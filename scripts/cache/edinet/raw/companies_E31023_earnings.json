@@ -1,0 +1,55 @@
+{
+  "data": {
+    "count": 1,
+    "earnings": [
+      {
+        "accounting_standard": "JP_GAAP",
+        "adjusted_annual_dividend_per_share": 52.0,
+        "average_shares": 13083078,
+        "cf_financing": -1590,
+        "cf_investing": -2489,
+        "cf_operating": 1809,
+        "comprehensive_income_change": -2.4,
+        "disclosure_date": "Thu, 12 Feb 2026 00:00:00 GMT",
+        "disclosure_time": "15:30",
+        "dividend_per_share": 52.0,
+        "eps": 116.16,
+        "equity_ratio": 74.2,
+        "fiscal_year_end": "2025-12-31",
+        "forecast_dividend_per_share": 58.0,
+        "forecast_eps": 130.23,
+        "forecast_net_income": 1660,
+        "forecast_net_income_change": 9.2,
+        "forecast_operating_income": 2350,
+        "forecast_operating_income_change": 12.1,
+        "forecast_ordinary_income": 2380,
+        "forecast_ordinary_income_change": 10.9,
+        "forecast_revenue": 6150,
+        "forecast_revenue_change": 10.4,
+        "is_consolidated": true,
+        "is_correction": false,
+        "net_assets": 6574,
+        "net_income": 1519,
+        "net_income_change": -3.7,
+        "operating_income": 2095,
+        "operating_income_change": -5.4,
+        "ordinary_income": 2146,
+        "ordinary_income_change": -3.6,
+        "owners_equity": 6535,
+        "pdf_url": "https://www.release.tdnet.info/inbs/140120260210554099.pdf",
+        "quarter": 4,
+        "revenue": 5570,
+        "revenue_change": 0.1,
+        "shares_outstanding": 13228800,
+        "title": "2025年12月期決算短信〔日本基準〕(連結)",
+        "total_assets": 8808,
+        "treasury_shares": 482280
+      }
+    ],
+    "edinet_code": "E31023"
+  },
+  "meta": {
+    "coverage": "Last ~30 days of disclosures",
+    "data_source": "Company IR disclosures"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "data": {
+    "count": 0,
+    "earnings": [],
+    "edinet_code": "E05091"
+  },
+  "meta": {
+    "coverage": "Last ~30 days of disclosures",
+    "data_source": "Company IR disclosures"
+  }
+}

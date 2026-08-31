@@ -1,0 +1,58 @@
+{
+  "data": {
+    "count": 1,
+    "earnings": [
+      {
+        "accounting_standard": "JP_GAAP",
+        "adjusted_annual_dividend_per_share": 13.8,
+        "average_shares": 13492019,
+        "cf_financing": -137,
+        "cf_investing": -573,
+        "cf_operating": 3413,
+        "comprehensive_income_change": 113.5,
+        "diluted_eps": 174.64,
+        "disclosure_date": "Mon, 13 Apr 2026 00:00:00 GMT",
+        "disclosure_time": "15:30",
+        "dividend_per_share": 13.8,
+        "eps": 177.73,
+        "equity_ratio": 78.9,
+        "fiscal_year_end": "2026-02-28",
+        "forecast_dividend_per_share": 16.8,
+        "forecast_eps": 162.86,
+        "forecast_net_income": 2200,
+        "forecast_net_income_change": -8.3,
+        "forecast_operating_income": 3250,
+        "forecast_operating_income_change": -10.3,
+        "forecast_ordinary_income": 3238,
+        "forecast_ordinary_income_change": -10.3,
+        "forecast_revenue": 10844,
+        "forecast_revenue_change": 13.6,
+        "interim_dividend_per_share": 0.0,
+        "is_consolidated": true,
+        "is_correction": false,
+        "net_assets": 9275,
+        "net_income": 2397,
+        "net_income_change": 114.3,
+        "operating_income": 3622,
+        "operating_income_change": 93.0,
+        "ordinary_income": 3611,
+        "ordinary_income_change": 92.8,
+        "owners_equity": 9137,
+        "pdf_url": "https://www.release.tdnet.info/inbs/140120260410502124.pdf",
+        "quarter": 4,
+        "revenue": 9546,
+        "revenue_change": 19.3,
+        "shares_outstanding": 13533303,
+        "title": "2026年２月期 決算短信〔日本基準〕（連結）",
+        "total_assets": 11584,
+        "treasury_shares": 25168,
+        "yearend_dividend_per_share": 13.8
+      }
+    ],
+    "edinet_code": "E31965"
+  },
+  "meta": {
+    "coverage": "Last ~30 days of disclosures",
+    "data_source": "Company IR disclosures"
+  }
+}

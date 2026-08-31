@@ -1,0 +1,52 @@
+{
+  "data": {
+    "count": 1,
+    "earnings": [
+      {
+        "accounting_standard": "JP_GAAP",
+        "adjusted_annual_dividend_per_share": 58.0,
+        "average_shares": 40753718,
+        "comprehensive_income_change": 32.0,
+        "disclosure_date": "Fri, 06 Feb 2026 00:00:00 GMT",
+        "disclosure_time": "16:00",
+        "dividend_per_share": 58.0,
+        "eps": 87.92,
+        "equity_ratio": 71.7,
+        "fiscal_year_end": "2026-03-31",
+        "forecast_dividend_per_share": 58.0,
+        "forecast_eps": 121.29,
+        "forecast_net_income": 4900,
+        "forecast_net_income_change": 11.2,
+        "forecast_operating_income": 7000,
+        "forecast_operating_income_change": 17.0,
+        "forecast_ordinary_income": 7140,
+        "forecast_ordinary_income_change": 13.5,
+        "forecast_revenue": 64000,
+        "forecast_revenue_change": 8.9,
+        "is_consolidated": true,
+        "is_correction": false,
+        "net_assets": 32258,
+        "net_income": 3583,
+        "net_income_change": 22.4,
+        "operating_income": 4618,
+        "operating_income_change": 11.2,
+        "ordinary_income": 4897,
+        "ordinary_income_change": 10.6,
+        "owners_equity": 32258,
+        "pdf_url": "https://www.release.tdnet.info/inbs/140120260205549010.pdf",
+        "quarter": 3,
+        "revenue": 47202,
+        "revenue_change": 9.5,
+        "shares_outstanding": 42000000,
+        "title": "2026年３月期第３四半期決算短信〔日本基準〕(連結)",
+        "total_assets": 44979,
+        "treasury_shares": 1602093
+      }
+    ],
+    "edinet_code": "E04988"
+  },
+  "meta": {
+    "coverage": "Last ~30 days of disclosures",
+    "data_source": "Company IR disclosures"
+  }
+}

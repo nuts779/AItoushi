@@ -1,0 +1,51 @@
+{
+  "data": {
+    "count": 1,
+    "earnings": [
+      {
+        "accounting_standard": "JP_GAAP",
+        "adjusted_annual_dividend_per_share": 100.0,
+        "average_shares": 27291194,
+        "disclosure_date": "Mon, 16 Feb 2026 00:00:00 GMT",
+        "disclosure_time": "16:00",
+        "dividend_per_share": 100.0,
+        "eps": 265.2,
+        "equity_ratio": 71.8,
+        "fiscal_year_end": "2026-06-30",
+        "forecast_dividend_per_share": 100.0,
+        "forecast_eps": 342.22,
+        "forecast_net_income": 9340,
+        "forecast_net_income_change": 91.0,
+        "forecast_operating_income": 7287,
+        "forecast_operating_income_change": 2.7,
+        "forecast_ordinary_income": 7287,
+        "forecast_ordinary_income_change": 2.2,
+        "forecast_revenue": 26300,
+        "forecast_revenue_change": 13.9,
+        "is_consolidated": false,
+        "is_correction": false,
+        "net_assets": 23596,
+        "net_income": 7237,
+        "net_income_change": 163.5,
+        "operating_income": 3685,
+        "operating_income_change": -8.6,
+        "ordinary_income": 3682,
+        "ordinary_income_change": -8.2,
+        "owners_equity": 23596,
+        "pdf_url": "https://www.release.tdnet.info/inbs/140120260216563079.pdf",
+        "quarter": 2,
+        "revenue": 12938,
+        "revenue_change": 6.9,
+        "shares_outstanding": 28280840,
+        "title": "2026年6月期 第2四半期（中間期）決算短信［日本基準］（非連結）",
+        "total_assets": 32847,
+        "treasury_shares": 989726
+      }
+    ],
+    "edinet_code": "E31216"
+  },
+  "meta": {
+    "coverage": "Last ~30 days of disclosures",
+    "data_source": "Company IR disclosures"
+  }
+}

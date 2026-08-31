@@ -1,0 +1,41 @@
+{
+  "data": {
+    "count": 1,
+    "earnings": [
+      {
+        "accounting_standard": "IFRS",
+        "average_shares": 5707435853,
+        "comprehensive_income_change": 179.5,
+        "diluted_eps": 552.86,
+        "disclosure_date": "Thu, 12 Feb 2026 00:00:00 GMT",
+        "disclosure_time": "15:30",
+        "eps": 553.47,
+        "equity_ratio": 28.1,
+        "fiscal_year_end": "2026-03-31",
+        "is_consolidated": true,
+        "is_correction": false,
+        "net_assets": 18311155,
+        "net_income": 3172653,
+        "net_income_change": 398.7,
+        "ordinary_income": 4169160,
+        "ordinary_income_change": 228.0,
+        "owners_equity": 15638641,
+        "pdf_url": "https://www.release.tdnet.info/inbs/140120260108530946.pdf",
+        "profit_ifrs": 3733454,
+        "profit_ifrs_change": 253.0,
+        "quarter": 3,
+        "revenue": 5719247,
+        "revenue_change": 7.9,
+        "shares_outstanding": 5711848120,
+        "title": "2026年３月期 第３四半期決算短信〔ＩＦＲＳ〕（連結）",
+        "total_assets": 55557312,
+        "treasury_shares": 13084184
+      }
+    ],
+    "edinet_code": "E02778"
+  },
+  "meta": {
+    "coverage": "Last ~30 days of disclosures",
+    "data_source": "Company IR disclosures"
+  }
+}
