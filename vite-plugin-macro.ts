@@ -4,10 +4,15 @@ import path from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 /**
- * Vite dev plugin: /api/fetch-macro エンドポイント
+ * Vite dev plugin: 2つの開発用エンドポイントを提供する
+ *
+ *   POST /api/fetch-macro    … マクロ分析を更新（Claude を呼ぶ・API利用料が発生）
+ *   POST /api/refresh-prices … 株価だけ更新（Python のみ・課金なし・約12秒）
+ *
+ * /api/fetch-macro の処理フロー:
  *
  * 処理フロー:
- *   ① python scripts/fetch_macro.py を実行
+ *   ① ${PYTHON_BIN} scripts/fetch_macro.py を実行（既定 python3 / 環境変数 PYTHON で変更可）
  *      → scripts/macro_raw.txt を生成
  *   ② claude -p "<プロンプト>" で macro_raw.txt を分析し、**JSON** を stdout に出力
  *   ③ Node.js 側で JSON をパース → src/data.ts を機械的に書き換え
@@ -15,6 +20,11 @@ import { readFileSync, writeFileSync } from 'node:fs';
  *
  * 通信方式: Server-Sent Events (SSE)
  */
+
+// Python 実行コマンド。
+// macOS / Linux は `python3`、Windows は `python` が標準のため既定値を python3 とし、
+// 環境変数 PYTHON で上書きできるようにする（例: PYTHON=python npm run dev）
+const PYTHON_BIN = process.env.PYTHON ?? 'python3';
 
 // Claude に JSON のみを出力させるプロンプト
 const CLAUDE_PROMPT = `あなたはデータ変換スクリプトです。対話は禁止。以下を厳守してください。
@@ -301,10 +311,10 @@ export function macroPlugin(): Plugin {
         };
 
         send({ type: 'log', message: '=== マクロ分析開始 ===' });
-        send({ type: 'step', step: 1, message: '① 最新記事を取得中... (python scripts/fetch_macro.py)' });
+        send({ type: 'step', step: 1, message: `① 最新記事を取得中... (${PYTHON_BIN} scripts/fetch_macro.py)` });
 
         // ① Python スクリプトで記事取得
-        const py = spawn('python', ['scripts/fetch_macro.py'], {
+        const py = spawn(PYTHON_BIN, ['scripts/fetch_macro.py'], {
           cwd,
           shell: true,
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -323,27 +333,43 @@ export function macroPlugin(): Plugin {
           });
         });
         py.on('error', (err) => {
-          finish('error', `Python実行エラー: ${err.message}`);
+          finish('error', `Python実行エラー（${PYTHON_BIN}）: ${err.message}`);
         });
 
         py.on('close', (code) => {
           if (code !== 0) {
-            finish('error', `fetch_macro.py が失敗 (exit=${code})`);
+            // 127 = command not found（Python のコマンド名が環境と合っていない）
+            const hint =
+              code === 127
+                ? `：'${PYTHON_BIN}' コマンドが見つかりません。環境変数 PYTHON で実行コマンドを指定してください（例: PYTHON=python npm run dev）`
+                : '';
+            finish('error', `fetch_macro.py が失敗 (exit=${code})${hint}`);
             return;
           }
           send({ type: 'log', message: '✓ macro_raw.txt を生成しました' });
           send({ type: 'step', step: 2, message: '② Claude Code で分析中... (claude -p → JSON)' });
 
           // ② claude -p で JSON を得る
+          // プロンプトは **argv ではなく stdin** で渡す。
+          // CLAUDE_PROMPT には改行・引用符・バッククォート（```json のコードフェンス）が
+          // 含まれるため、argv に載せると shell: true 実行時にシェルへ素通しされ、
+          // バッククォートがコマンド置換として解釈されてプロンプトが破壊される
+          // （macOS/Linux で発生。Windows の cmd.exe では顕在化しなかった）。
+          // stdin 経由なら shell を経由しないので、どの OS でも内容がそのまま届く。
           const claude = spawn(
             'claude',
-            ['-p', CLAUDE_PROMPT, '--permission-mode', 'acceptEdits'],
+            ['-p', '--permission-mode', 'acceptEdits'],
             {
               cwd,
               shell: true,
-              stdio: ['ignore', 'pipe', 'pipe'],
+              stdio: ['pipe', 'pipe', 'pipe'],
             }
           );
+
+          // プロンプトを stdin に流し込んで閉じる（EOF を送らないと claude が待ち続ける）
+          claude.stdin.on('error', () => { /* 相手が先に終了した場合は無視 */ });
+          claude.stdin.write(CLAUDE_PROMPT);
+          claude.stdin.end();
 
           let claudeStdout = '';
           claude.stdout.on('data', (chunk) => {
@@ -390,6 +416,72 @@ export function macroPlugin(): Plugin {
         });
 
         // クライアント切断時の後始末
+        req.on('close', () => {
+          if (!finished) {
+            try { py.kill(); } catch {}
+          }
+        });
+      });
+
+      // ── 株価だけを更新する（Claude を呼ばないので課金は発生しない） ──
+      server.middlewares.use('/api/refresh-prices', (req, res) => {
+        if (req.method !== 'POST' && req.method !== 'GET') {
+          res.statusCode = 405;
+          res.end('Method Not Allowed');
+          return;
+        }
+
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        });
+
+        const send = (data: Record<string, unknown>) => {
+          res.write(`data: ${JSON.stringify(data)}\n\n`);
+        };
+
+        let finished = false;
+        const finish = (type: 'done' | 'error', message?: string) => {
+          if (finished) return;
+          finished = true;
+          send({ type, message });
+          res.end();
+        };
+
+        send({ type: 'log', message: `株価を取得中... (${PYTHON_BIN} scripts/refresh_prices.py)` });
+
+        const py = spawn(PYTHON_BIN, ['scripts/refresh_prices.py'], {
+          cwd: process.cwd(),
+          shell: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        py.stdout.on('data', (chunk) => {
+          chunk.toString('utf8').split(/\r?\n/).forEach((line: string) => {
+            if (line.trim()) send({ type: 'log', message: line });
+          });
+        });
+        py.stderr.on('data', (chunk) => {
+          chunk.toString('utf8').split(/\r?\n/).forEach((line: string) => {
+            if (line.trim()) send({ type: 'log', message: `[py-err] ${line}` });
+          });
+        });
+        py.on('error', (err) => {
+          finish('error', `Python実行エラー（${PYTHON_BIN}）: ${err.message}`);
+        });
+        py.on('close', (code) => {
+          if (code !== 0) {
+            const hint =
+              code === 127
+                ? `：'${PYTHON_BIN}' コマンドが見つかりません。環境変数 PYTHON で指定してください`
+                : '';
+            finish('error', `refresh_prices.py が失敗 (exit=${code})${hint}`);
+            return;
+          }
+          finish('done', '株価を更新しました');
+        });
+
         req.on('close', () => {
           if (!finished) {
             try { py.kill(); } catch {}

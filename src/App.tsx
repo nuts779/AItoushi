@@ -5,6 +5,7 @@ import ScreeningView from './ScreeningView';
 import DeepDiveView from './DeepDiveView';
 import PortfolioView from './PortfolioView';
 import FreshnessBanner from './FreshnessBanner';
+import PriceRefreshButton from './PriceRefreshButton';
 
 const tabs: { id: Tab; step: string; label: string }[] = [
   { id: 'macro',     step: 'ステップ1', label: 'マクロ分析' },
@@ -30,6 +31,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <FreshnessBanner />
+            <PriceRefreshButton />
             <p className="text-xs text-amber-600 font-medium whitespace-nowrap">⚠ 投資判断は自己責任で</p>
           </div>
         </div>
