@@ -25,16 +25,19 @@ export interface Stock {
   high52w: number;
   consecutiveDividendYears: number;
   trapReasons: string[];
-  dataSource?: 'edinet_db' | 'irbank';
+  // 'unavailable' = 財務データを取得できなかった銘柄。代替データで埋めず明示する
+  dataSource?: 'edinet_db' | 'irbank' | 'unavailable';
+  scoreBreakdown?: ScoreBreakdown;
 }
 
+// null = 算出に必要なデータを取得していない項目（画面には「未算出」と表示する）
 export interface ScoreBreakdown {
-  catalyst: number;   // max 20
-  momentum: number;   // max 20
-  supply: number;     // max 15
-  valuation: number;  // max 15
-  downside: number;   // max 15
-  dividend: number;   // max 15
+  catalyst: number | null;   // max 20 … 決算発表予定日が未取得
+  momentum: number | null;   // max 20
+  supply: number | null;     // max 15 … 信用倍率・出来高が未取得
+  valuation: number | null;  // max 15
+  downside: number | null;   // max 15
+  dividend: number | null;   // max 15
 }
 
 export interface DeepStock extends Stock {
@@ -56,7 +59,7 @@ export interface DeepStock extends Stock {
 export interface EdinetDetail {
   code: string;
   name: string;
-  dataSource: 'edinet_db' | 'irbank';
+  dataSource: 'edinet_db' | 'irbank' | 'unavailable';
   fetchDate: string;
   fiscalYear?: number;
   annualEquityRatio?: number;

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { portfolioPositions, edinetDetails, screeningStocks, pipelineMeta } from './data';
 import type { VerdictRating, EdinetDetail } from './types';
+import { sourceStyle, isUnavailable } from './dataSource';
 
 function chg(v: number | null | undefined) {
   if (v == null) return null;
@@ -20,10 +21,9 @@ function EdinetRow({ d, rank }: { d: EdinetDetail; rank: number }) {
         <div className="text-gray-700 text-xs whitespace-nowrap">{d.name}</div>
       </td>
       <td className="px-3 py-2.5 text-center">
-        {d.dataSource === 'edinet_db'
-          ? <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 font-mono">EDINET</span>
-          : <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 border border-gray-200 font-mono">IRBANK</span>
-        }
+        <span className={`text-xs px-1.5 py-0.5 rounded font-mono ${sourceStyle(d.dataSource).badge}`}>
+          {sourceStyle(d.dataSource).short}
+        </span>
       </td>
       {/* Annual */}
       <td className="px-3 py-2.5 text-center font-mono text-xs text-gray-500">{hasAnnual ? `FY${d.fiscalYear}` : '—'}</td>
@@ -47,7 +47,7 @@ function EdinetRow({ d, rank }: { d: EdinetDetail; rank: number }) {
       </td>
       <td className="px-3 py-2.5 text-right font-mono text-xs">
         {hasLatest && d.forecastNetIncome != null
-          ? <span className="text-gray-700">{(d.forecastNetIncome / 1000).toFixed(1)}億</span>
+          ? <span className="text-gray-700">{(d.forecastNetIncome / 100).toFixed(1)}億</span>
           : <span className="text-gray-300">—</span>
         }
       </td>
@@ -250,7 +250,16 @@ export default function PortfolioView() {
             <span className="text-xs bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded font-mono">
               取得日: {pipelineMeta.runDate}
             </span>
-            <span className="text-xs text-gray-400">EDINET DB {edinetDetails.filter(d => d.dataSource === 'edinet_db').length}社 / IRBANK {edinetDetails.filter(d => d.dataSource === 'irbank').length}社</span>
+            <span className="text-xs text-gray-400">
+              EDINET DB {edinetDetails.filter(d => d.dataSource === 'edinet_db').length}社
+              {edinetDetails.filter(d => d.dataSource === 'irbank').length > 0 &&
+                ` / IRBANK ${edinetDetails.filter(d => d.dataSource === 'irbank').length}社`}
+            </span>
+            {edinetDetails.filter(d => isUnavailable(d.dataSource)).length > 0 && (
+              <span className="text-xs bg-red-50 text-red-700 border border-red-200 px-2 py-0.5 rounded font-semibold">
+                財務未取得 {edinetDetails.filter(d => isUnavailable(d.dataSource)).length}社
+              </span>
+            )}
           </div>
           <span className="text-gray-400 text-sm">{showData ? '▲ 閉じる' : '▼ 開く'}</span>
         </button>
