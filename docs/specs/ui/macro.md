@@ -100,6 +100,9 @@
 | 業種コード | JPX 33業種コードから厳密選択（プロンプトにコード表を内蔵・4桁数字でバリデーション） |
 | 連動 | `targetSectors` 変更 → `generatedCommand` の `--industries` が自動追従 |
 | 可視化 | 「狙うセクター（コード付き）」リスト＋コマンド欄上部の絞り込み業種チップで、現在の対象業種が常に見える |
+| 実行環境（2026-09-01 追加） | Python の実行コマンドは `vite-plugin-macro.ts` の `PYTHON_BIN` で決まる。**既定は `python3`**（macOS / Linux 標準）。Windows など `python` で起動する環境では `PYTHON=python npm run dev` のように環境変数で上書きする |
+| エラー表示 | Python コマンドが見つからない場合（exit=127）は、進捗パネルに「'python3' コマンドが見つかりません。環境変数 PYTHON で実行コマンドを指定してください」と原因と対処を明示する |
+| プロンプト受け渡し（2026-09-01 追加） | `CLAUDE_PROMPT` は **stdin 経由**で `claude -p` に渡す。argv に載せると `shell: true` によりシェルへ素通しされ、スキーマ内のバッククォート（```json コードフェンス）がコマンド置換として解釈されプロンプトが壊れる（BUG-002） |
 
 ---
 
