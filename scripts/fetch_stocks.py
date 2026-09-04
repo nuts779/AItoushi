@@ -10,7 +10,11 @@
     dataSource='unavailable' / freshness='critical' として明示する。
 """
 import sys, io, argparse, time, json, warnings
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# 出力を UTF-8 にする。新しい TextIOWrapper を被せると、
+# 別スクリプトから import されたとき前のラッパーが破棄されて
+# 元の buffer ごと閉じられてしまうため、reconfigure で既存の stdout を設定し直す。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 warnings.filterwarnings('ignore')
 
 import requests
@@ -137,6 +141,7 @@ def main():
 
     # Step1: 銘柄リスト取得
     master = fetch_jpx_master(industry_codes)
+    universe_count = len(master)   # 母集団（指定業種・プライム/スタンダードのみ）
 
     # Step2: yfinanceでスクリーニング
     print(f'[2/4] yfinanceで{len(master)}社をスクリーニング中...')
@@ -173,7 +178,9 @@ def main():
     # Step3: 深掘り（EDINET DB に一本化・IRBANK廃止）
     # 取得失敗時は黙って代替せず dataSource='unavailable' として明示する（鮮度保証方針）
     print(f'\n[3/4] EDINET DB で財務深掘り中（公式XBRL・毎日8時更新）...')
-    from edinet_fetcher import EDINETClient, extract_metrics, detect_trap_v2, calc_freshness_edinet
+    from edinet_fetcher import (EDINETClient, extract_metrics, extract_detail,
+                                detect_trap_v2, calc_freshness_edinet,
+                                calc_score_breakdown)
     edinet = EDINETClient()
     code_map = edinet.build_code_map()
     edinet_count = unavailable_count = 0
@@ -202,6 +209,12 @@ def main():
 
         if company:
             metrics = extract_metrics(company)
+            # ダッシュボードの「取得財務データ一覧」用の詳細も同時に保持する。
+            # ここで結果に残さないと update_data.py が edinetDetails を再生成できず、
+            # スクリーニングを流し直すたびに財務一覧が空になる（L-07）。
+            detail = extract_detail(company)
+            # 6項目評価。算出根拠が無い項目は None のまま画面に「未算出」と出す
+            breakdown = calc_score_breakdown(metrics, s)
             trap_flag, trap_reasons, penalty = detect_trap_v2(metrics)
             deep_score  = min(100, max(0, s['score'] + penalty))
             freshness   = calc_freshness_edinet(metrics.get('disclosure_date'))
@@ -222,6 +235,8 @@ def main():
                 'equityRatio': eq_ratio,
                 'consecutiveDividendYears': 0,
                 'dataSource': 'edinet_db',
+                'edinetDetail': detail,
+                'scoreBreakdown': breakdown,
             })
             continue
 
@@ -252,6 +267,24 @@ def main():
 
     final = results[:args.top]
     print(f'\n[4/4] 完了: 上位{len(final)}社を出力')
+
+    # 実行メタを出力。ダッシュボードのサマリーカード（母集団・1段階目・2段階目）は
+    # これを参照する。持たせないと画面が固定値を表示し、実行結果と食い違う。
+    meta_path = 'scripts/screening_meta.json'
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump({
+            'runDate': date.today().isoformat(),
+            'preset': args.preset,
+            'industries': industry_codes,
+            'universeCount': universe_count,      # 対象業種の全銘柄
+            'stage1Count': len(candidates),       # プリセット通過
+            'deepCount': len(results),            # EDINET DB 深掘り対象
+            'outputCount': len(final),            # 最終出力
+            'edinetCount': edinet_count,          # 財務取得できた社数
+            'unavailableCount': unavailable_count,  # 財務を取得できなかった社数
+        }, f, ensure_ascii=False, indent=2)
+    print(f'実行メタを {meta_path} に保存しました'
+          f'（母集団{universe_count} → 1段階目{len(candidates)} → 深掘り{len(results)} → 出力{len(final)}）')
 
     # JSON形式で出力（update_data.pyが読み込む）
     output_path = 'scripts/screening_result.json'

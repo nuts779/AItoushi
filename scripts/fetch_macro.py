@@ -9,7 +9,11 @@ import sys, io, re, time, requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# 出力を UTF-8 にする。新しい TextIOWrapper を被せると、
+# 別スクリプトから import されたとき前のラッパーが破棄されて
+# 元の buffer ごと閉じられてしまうため、reconfigure で既存の stdout を設定し直す。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 ARTICLE_COUNT = 3  # 各エコノミストから取得する記事数

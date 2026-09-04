@@ -9,7 +9,11 @@ import sys, io, json, requests, argparse
 from pathlib import Path
 from datetime import datetime, timedelta, date
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# 出力を UTF-8 にする。新しい TextIOWrapper を被せると、
+# 別スクリプトから import されたとき前のラッパーが破棄されて
+# 元の buffer ごと閉じられてしまうため、reconfigure で既存の stdout を設定し直す。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 BASE_URL = "https://edinetdb.jp/v1"
 CACHE_DIR = Path("scripts/cache/edinet")
@@ -167,6 +171,7 @@ def extract_metrics(company: dict) -> dict:
     oi_5y  = [float(f.get("ordinary_income") or 0) for f in recent_5y]
     ni_5y  = [float(f.get("net_income")      or 0) for f in recent_5y]
     eps_5y = [float(f.get("eps")             or 0) for f in recent_5y]
+    rev_5y = [float(f.get("revenue")         or 0) for f in recent_5y]
     eq_ratio = to_pct(latest.get("equity_ratio_official"))
 
     # TDNet開示日：earnings にあればそちらを使用、なければ決算期末から推定
@@ -182,6 +187,7 @@ def extract_metrics(company: dict) -> dict:
         "oi_5y":               oi_5y,
         "ni_5y":               ni_5y,
         "eps_5y":              eps_5y,
+        "rev_5y":              rev_5y,
         "equity_ratio":        eq_ratio,
         "disclosure_date":     disclosure_date,
         "accounting_standard": acct_std,
@@ -190,6 +196,73 @@ def extract_metrics(company: dict) -> dict:
         "latest_roe":          roe_5y[-1] if roe_5y else 0,
         "fiscal_year":         latest.get("fiscal_year"),
     }
+
+
+# ──────────────────────────────────────────
+# 財務詳細の抽出（ダッシュボードの edinetDetails 用）
+# ──────────────────────────────────────────
+def extract_detail(company: dict) -> dict:
+    """
+    EDINETデータから src/types.ts の EdinetDetail 相当の値を抽出する。
+
+    単位の扱い（実データで検証済み）:
+      - financials（有報）の revenue / net_income 等は「円」→ 1e8 で割って億円にする
+      - financials の equity_ratio_official / roe_official は 0〜1 の小数 → ×100 で %
+      - earnings（決算短信）の金額は「百万円」（eps×株数と一致することを確認）
+      - earnings の equity_ratio は既に % 表記
+    """
+    financials = company.get("financials", [])
+    earnings = company.get("earnings", [])
+    if not financials:
+        return {}
+
+    latest = financials[-1]
+
+    def oku(v):
+        """円 → 億円（小数1桁）"""
+        if v is None:
+            return None
+        return round(float(v) / 1e8, 1)
+
+    def pct(v):
+        """0〜1の小数なら % に変換"""
+        if v is None:
+            return None
+        fv = float(v)
+        return round(fv * 100 if abs(fv) <= 1.0 else fv, 1)
+
+    detail = {
+        "fiscalYear": latest.get("fiscal_year"),
+        "annualEquityRatio": pct(latest.get("equity_ratio_official")),
+        "annualROE": pct(latest.get("roe_official")),
+        "annualNetIncome": oku(latest.get("net_income")),
+        "annualOrdinaryIncome": oku(latest.get("ordinary_income")),
+        "annualRevenue": oku(latest.get("revenue")),
+        # 直近決算短信。EDINET DB は直近30日ウィンドウのため取れないことがある。
+        # その場合は黙って埋めず null のままにする（鮮度保証の方針）。
+        "latestQuarter": None,
+        "latestDisclosureDate": None,
+        "latestEquityRatio": None,
+        "latestNetIncome": None,
+        "latestNetIncomeChange": None,
+        "forecastNetIncome": None,
+        "forecastNetIncomeChange": None,
+    }
+
+    if earnings:
+        e = earnings[0]
+        d = parse_date(e.get("disclosure_date"))
+        detail.update({
+            "latestQuarter": e.get("quarter"),
+            "latestDisclosureDate": d.isoformat() if d else None,
+            "latestEquityRatio": e.get("equity_ratio"),
+            "latestNetIncome": e.get("net_income"),
+            "latestNetIncomeChange": e.get("net_income_change"),
+            "forecastNetIncome": e.get("forecast_net_income"),
+            "forecastNetIncomeChange": e.get("forecast_net_income_change"),
+        })
+
+    return detail
 
 
 # ──────────────────────────────────────────
@@ -254,6 +327,99 @@ def detect_trap_v2(metrics: dict) -> tuple[str, list[str], int]:
     else:
         bonus = 3 if eq >= 60 else 0
         return "normal", [], bonus
+
+
+# ──────────────────────────────────────────
+# 6項目評価（100点満点）
+# ──────────────────────────────────────────
+# 現在データを取得できているのは4項目・65点ぶん。
+# 残る2項目は算出根拠が無いため None を返し、画面に「未算出」と表示させる。
+# 取得できていないものを中立値などで埋めると、評価が成立していないことが見えなくなる。
+#
+#   ① カタリスト   /20 … 決算発表予定日の取得手段が無いため未算出
+#   ② モメンタム   /20 … EDINET の年次推移から算出
+#   ③ 需給・テクニカル /15 … 信用倍率・出来高を取得していないため未算出
+#   ④ バリュエーション /15 … PER・PBR から算出
+#   ⑤ 下値リスク   /15 … 自己資本比率から算出
+#   ⑥ 配当         /15 … 配当利回りから算出（連続増配ぶん3点は未取得のため最大12）
+
+SCORE_MAX = {
+    "catalyst": 20, "momentum": 20, "supply": 15,
+    "valuation": 15, "downside": 15, "dividend": 15,
+}
+
+
+def _yoy(series: list[float]) -> float | None:
+    """直近と前期の変化率(%)。前期が0以下なら比較不能として None を返す。"""
+    if len(series) < 2:
+        return None
+    prev, latest = series[-2], series[-1]
+    if prev <= 0:
+        return None
+    return (latest - prev) / prev * 100
+
+
+def _band(value, table, default=0):
+    """(閾値, 点数) のリストを上から評価して点数を返す。"""
+    if value is None:
+        return default
+    for threshold, points in table:
+        if value >= threshold:
+            return points
+    return default
+
+
+def calc_score_breakdown(metrics: dict, yf_data: dict) -> dict:
+    """6項目評価を算出する。算出できない項目は None。"""
+    # ② モメンタム /20 … 純利益10 + 経常利益6 + 売上4
+    ni_yoy = _yoy(metrics.get("ni_5y", []))
+    oi_yoy = _yoy(metrics.get("oi_5y", []))
+    rev_yoy = _yoy(metrics.get("rev_5y", []))
+    if ni_yoy is None and oi_yoy is None and rev_yoy is None:
+        momentum = None
+    else:
+        momentum = (
+            _band(ni_yoy,  [(30, 10), (15, 8), (5, 6), (0.01, 3)])
+            + _band(oi_yoy, [(30, 6), (15, 5), (5, 3), (0.01, 2)])
+            + _band(rev_yoy, [(10, 4), (5, 3), (0.01, 2)])
+        )
+
+    # ④ バリュエーション /15 … PER8 + PBR7
+    # PER が取れない銘柄は「割安と判断できない」ため加点しない（0点）
+    per = yf_data.get("per")
+    pbr = yf_data.get("pbr") or 0
+    per_pts = 0
+    if per is not None:
+        if 8 <= per <= 15:   per_pts = 8
+        elif per < 8:        per_pts = 6
+        elif per <= 20:      per_pts = 6
+        elif per <= 25:      per_pts = 4
+        else:                per_pts = 2
+    if pbr <= 0:      pbr_pts = 0
+    elif pbr < 1.0:   pbr_pts = 7
+    elif pbr < 1.5:   pbr_pts = 6
+    elif pbr < 2.0:   pbr_pts = 5
+    elif pbr < 3.0:   pbr_pts = 3
+    else:             pbr_pts = 1
+    valuation = per_pts + pbr_pts
+
+    # ⑤ 下値リスク /15 … 自己資本比率
+    eq = metrics.get("equity_ratio")
+    downside = _band(eq, [(70, 15), (60, 13), (50, 11), (40, 8), (30, 5)], default=2) \
+        if eq else None
+
+    # ⑥ 配当 /15 … 利回りのみ（連続増配年数は未取得のため最大12点）
+    div = yf_data.get("dividend")
+    dividend = _band(div, [(5, 12), (4, 11), (3, 9), (2, 6), (1, 3)]) if div is not None else None
+
+    return {
+        "catalyst":  None,       # 決算発表予定日を取得していない
+        "momentum":  momentum,
+        "supply":    None,       # 信用倍率・出来高を取得していない
+        "valuation": valuation,
+        "downside":  downside,
+        "dividend":  dividend,
+    }
 
 
 # ──────────────────────────────────────────
