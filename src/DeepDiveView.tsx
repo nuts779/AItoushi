@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { screeningStocks, pipelineMeta } from './data';
-import type { Stock, TrapFlag } from './types';
+import type { Stock, TrapFlag, ScoreBreakdown } from './types';
+import { sourceStyle, isUnavailable } from './dataSource';
+import { latestEarnings } from './earnings';
 
 const trapBadge: Record<TrapFlag, { cls: string; label: string }> = {
   normal:    { cls: 'bg-emerald-50 text-emerald-700 border border-emerald-200', label: '✓ normal' },
@@ -14,9 +16,10 @@ function daysSince(dateStr: string): number {
   return Math.floor((Date.now() - d.getTime()) / 86400000);
 }
 
-function FreshnessLabel({ irbankDate, dataSource }: { irbankDate: string; dataSource?: string }) {
+function FreshnessLabel({ code, irbankDate, dataSource }: { code: string; irbankDate: string; dataSource?: string }) {
   const days = daysSince(irbankDate);
-  const src  = dataSource === 'edinet_db' ? 'EDINET DB' : 'IRBANK';
+  const style = sourceStyle(dataSource);
+  const earnings = latestEarnings(code);
 
   let color = 'text-emerald-600';
   let tag   = 'fresh';
@@ -24,15 +27,14 @@ function FreshnessLabel({ irbankDate, dataSource }: { irbankDate: string; dataSo
   else if (days > 60) { color = 'text-amber-600';  tag = 'stale'; }
   else if (days > 30) { color = 'text-blue-600';   tag = 'normal'; }
 
-  const srcBadge = dataSource === 'edinet_db'
-    ? 'bg-blue-50 text-blue-700 border border-blue-200'
-    : 'bg-gray-100 text-gray-600 border border-gray-200';
-
   return (
     <span className="flex items-center gap-1.5 flex-wrap">
-      <span className={`text-xs px-1.5 py-0.5 rounded font-mono font-bold ${srcBadge}`}>{src}</span>
+      <span className={`text-xs px-1.5 py-0.5 rounded font-mono font-bold ${style.badge}`}>{style.short}</span>
+      {earnings && (
+        <span className="text-xs text-gray-500 font-medium">{earnings.label} {earnings.date}</span>
+      )}
       <span className={`text-xs font-mono font-semibold ${color}`}>
-        {days > 0 ? `${days}日前` : '本日取得'}
+        {!irbankDate ? '基準日なし' : days > 0 ? `${days}日前` : '本日取得'}
       </span>
       <span className={`text-xs ${color}`}>[{tag}]</span>
     </span>
@@ -65,6 +67,85 @@ function ScoreGauge({ score, deepScore }: { score: number; deepScore: number }) 
   );
 }
 
+// 6項目評価の定義。max は仕様書（ui/deepdive.md）の配点。
+// note は「なぜ算出できないか」。データが無いことを黙って隠さず理由まで出す。
+const SCORE_ITEMS: {
+  key: keyof ScoreBreakdown; label: string; max: number; note?: string;
+}[] = [
+  { key: 'catalyst',  label: '① カタリスト',     max: 20, note: '決算発表予定日を未取得' },
+  { key: 'momentum',  label: '② モメンタム',     max: 20 },
+  { key: 'supply',    label: '③ 需給・テクニカル', max: 15, note: '信用倍率・出来高を未取得' },
+  { key: 'valuation', label: '④ バリュエーション', max: 15 },
+  { key: 'downside',  label: '⑤ 下値リスク',     max: 15 },
+  { key: 'dividend',  label: '⑥ 配当',           max: 15, note: '連続増配ぶん3点は未取得' },
+];
+
+function ScoreBar({ label, value, max, note }: {
+  label: string; value: number | null | undefined; max: number; note?: string;
+}) {
+  const scored = typeof value === 'number';
+  const ratio = scored ? value / max : 0;
+  const bar = ratio >= 0.75 ? 'bg-emerald-500' : ratio >= 0.5 ? 'bg-blue-500' : 'bg-amber-400';
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline justify-between text-xs">
+        <span className="text-gray-600">{label}</span>
+        {scored ? (
+          <span className="font-mono text-gray-700">
+            <span className="font-semibold">{value}</span>
+            <span className="text-gray-400"> / {max}</span>
+          </span>
+        ) : (
+          <span className="font-mono text-gray-400">未算出</span>
+        )}
+      </div>
+      <div className="w-full bg-gray-100 rounded-full h-1.5">
+        {scored ? (
+          <div className={`${bar} h-1.5 rounded-full`} style={{ width: `${Math.min(100, ratio * 100)}%` }} />
+        ) : (
+          <div className="h-1.5 rounded-full bg-[repeating-linear-gradient(45deg,#e5e7eb,#e5e7eb_4px,transparent_4px,transparent_8px)] w-full" />
+        )}
+      </div>
+      {!scored && note && <div className="text-[10px] text-gray-400">{note}</div>}
+    </div>
+  );
+}
+
+function ScorePanel({ breakdown }: { breakdown?: ScoreBreakdown }) {
+  if (!breakdown) {
+    return (
+      <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-500">
+        6項目評価は未取得です。スクリーニングを再実行すると算出されます。
+      </div>
+    );
+  }
+
+  // 算出できた項目だけを合計する。未算出を0点として混ぜると
+  // 「評価が低い」のか「測っていない」のか区別できなくなる。
+  const scoredItems = SCORE_ITEMS.filter(i => typeof breakdown[i.key] === 'number');
+  const earned = scoredItems.reduce((a, i) => a + (breakdown[i.key] as number), 0);
+  const scoredMax = scoredItems.reduce((a, i) => a + i.max, 0);
+  const missing = 100 - scoredMax;
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-3">
+        <h4 className="text-gray-700 font-semibold text-sm">6項目評価</h4>
+        <span className="text-xs font-mono text-gray-500">
+          <span className="font-bold text-gray-700">{earned}</span> / {scoredMax}点
+          {missing > 0 && <span className="text-gray-400">（未算出 {missing}点ぶん）</span>}
+        </span>
+      </div>
+      <div className="space-y-2.5 bg-gray-50 rounded-lg p-3">
+        {SCORE_ITEMS.map(i => (
+          <ScoreBar key={i.key} label={i.label} value={breakdown[i.key]} max={i.max} note={i.note} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function StockCard({ s, expanded, onToggle }: { s: Stock; expanded: boolean; onToggle: () => void }) {
   const downPct   = (((s.price - s.high52w) / s.high52w) * 100).toFixed(1);
   const posFromLow = s.high52w > 0
@@ -90,7 +171,7 @@ function StockCard({ s, expanded, onToggle }: { s: Stock; expanded: boolean; onT
             </div>
             <div className="flex items-center gap-3 mt-1 flex-wrap">
               <span className="text-gray-400 text-xs">{s.industry}</span>
-              <FreshnessLabel irbankDate={s.irbankDate} dataSource={s.dataSource} />
+              <FreshnessLabel code={s.code} irbankDate={s.irbankDate} dataSource={s.dataSource} />
             </div>
           </div>
         </div>
@@ -132,6 +213,9 @@ function StockCard({ s, expanded, onToggle }: { s: Stock; expanded: boolean; onT
           {/* Left: スコア詳細 */}
           <div className="space-y-5">
             <ScoreGauge score={s.score} deepScore={s.deepScore} />
+
+            {/* 6項目評価（算出できた項目のみ点数を出す） */}
+            <ScorePanel breakdown={s.scoreBreakdown} />
 
             {/* 財務健全性（EDINET/IRBANK値） */}
             <div>
@@ -205,18 +289,18 @@ function StockCard({ s, expanded, onToggle }: { s: Stock; expanded: boolean; onT
               <h4 className="text-gray-600 font-semibold text-sm mb-1">データ取得情報</h4>
               <div className="flex justify-between">
                 <span className="text-gray-500">株価・指標（yfinance）</span>
-                <span className="font-mono text-gray-700">{pipelineMeta.runDate}（当日）</span>
+                <span className="font-mono text-gray-700">{pipelineMeta.priceDate ?? pipelineMeta.runDate}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">財務データソース</span>
-                <span className={`font-mono font-semibold ${s.dataSource === 'edinet_db' ? 'text-blue-700' : 'text-gray-600'}`}>
-                  {s.dataSource === 'edinet_db' ? 'EDINET DB（有報）' : 'IRBANK'}
+                <span className={`font-mono font-semibold ${sourceStyle(s.dataSource).text}`}>
+                  {sourceStyle(s.dataSource).label}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">財務データ基準日</span>
-                <span className={`font-mono ${daysSince(s.irbankDate) > 90 ? 'text-red-500 font-semibold' : 'text-gray-700'}`}>
-                  {s.irbankDate}（{daysSince(s.irbankDate)}日前）
+                <span className={`font-mono ${!s.irbankDate || daysSince(s.irbankDate) > 90 ? 'text-red-500 font-semibold' : 'text-gray-700'}`}>
+                  {s.irbankDate ? `${s.irbankDate}（${daysSince(s.irbankDate)}日前）` : '取得できていません'}
                 </span>
               </div>
               {daysSince(s.irbankDate) > 90 && (
@@ -237,8 +321,9 @@ export default function DeepDiveView() {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
   const toggle = (i: number) => setExpandedIdx(prev => prev === i ? null : i);
 
-  const edinetCount = targets.filter(s => s.dataSource === 'edinet_db').length;
-  const irbankCount = targets.filter(s => s.dataSource !== 'edinet_db').length;
+  const edinetCount      = targets.filter(s => s.dataSource === 'edinet_db').length;
+  const irbankCount      = targets.filter(s => s.dataSource === 'irbank').length;
+  const unavailableCount = targets.filter(s => isUnavailable(s.dataSource)).length;
 
   return (
     <div className="space-y-6">
@@ -256,16 +341,23 @@ export default function DeepDiveView() {
             <span className="bg-blue-50 text-blue-700 border border-blue-200 px-2 py-1 rounded font-bold">
               EDINET DB {edinetCount}社
             </span>
-            <span className="bg-gray-100 text-gray-600 border border-gray-200 px-2 py-1 rounded font-bold">
-              IRBANK {irbankCount}社
-            </span>
+            {irbankCount > 0 && (
+              <span className="bg-gray-100 text-gray-600 border border-gray-200 px-2 py-1 rounded font-bold">
+                IRBANK {irbankCount}社
+              </span>
+            )}
+            {unavailableCount > 0 && (
+              <span className="bg-red-50 text-red-700 border border-red-200 px-2 py-1 rounded font-bold">
+                財務未取得 {unavailableCount}社
+              </span>
+            )}
           </div>
         </div>
 
         {/* データ鮮度の注記 */}
         <div className="mt-3 p-3 bg-blue-50 rounded-lg text-xs text-blue-700 space-y-1">
           <div className="font-semibold">📊 データ構成について</div>
-          <div>• <strong>株価・PER・PBR・ROE</strong>: {pipelineMeta.runDate} yfinance取得（当日データ）</div>
+          <div>• <strong>株価・PER・PBR・ROE</strong>: {pipelineMeta.priceDate ?? pipelineMeta.runDate} yfinance取得</div>
           <div>• <strong>自己資本比率・罠検出</strong>: EDINET DB有報ベース（最終決算期の提出日）/ IRBANKスクレイプ</div>
           <div>• 財務データは最新決算期の有価証券報告書に基づく。「X日前」は財務データの基準日を示す</div>
         </div>

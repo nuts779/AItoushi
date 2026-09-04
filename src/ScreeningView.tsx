@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { screeningStocks, pipelineMeta } from './data';
+import { latestEarnings } from './earnings';
 import type { TrapFlag, FreshnessTag } from './types';
 
 function daysSince(dateStr: string): number {
@@ -31,6 +32,11 @@ const freshN     = screeningStocks.filter(s => s.freshness === 'fresh').length;
 const normalFN   = screeningStocks.filter(s => s.freshness === 'normal').length;
 const staleN     = screeningStocks.filter(s => s.freshness === 'stale').length;
 const criticalN  = screeningStocks.filter(s => s.freshness === 'critical').length;
+
+// pipelineMeta に件数が無い（古い data.ts）場合でも壊れないようにする
+function count(n: number | undefined): string {
+  return typeof n === 'number' ? `${n.toLocaleString()}社` : '—';
+}
 
 type SortKey = 'rank' | 'price' | 'per' | 'roe' | 'deepScore' | 'dividendYield';
 
@@ -67,10 +73,30 @@ export default function ScreeningView() {
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: '母集団',            value: '3,745社', sub: 'JPXマスター全銘柄',       color: 'text-gray-700' },
-          { label: '1段階目',           value: '40社',    sub: 'ROE + PER/PBRスクリーニング', color: 'text-blue-600' },
-          { label: '2段階目（EDINET DB + IRBANK）', value: `${screeningStocks.length}社`, sub: 'スコア60以上・罠検出済', color: 'text-emerald-600' },
-          { label: '罠検出',            value: `D:${dangerous} S:${suspicious} N:${normalN}`, sub: 'dangerous / suspicious / normal', color: 'text-amber-600' },
+          {
+            label: '母集団',
+            value: count(pipelineMeta.universeCount),
+            sub: '対象業種・プライム/スタンダード',
+            color: 'text-gray-700',
+          },
+          {
+            label: '1段階目',
+            value: count(pipelineMeta.stage1Count),
+            sub: 'プリセット通過（ROE/PER/PBR/配当）',
+            color: 'text-blue-600',
+          },
+          {
+            label: '2段階目（EDINET DB）',
+            value: count(pipelineMeta.deepCount),
+            sub: 'スコア60以上・罠検出済',
+            color: 'text-emerald-600',
+          },
+          {
+            label: '罠検出',
+            value: `D:${dangerous} S:${suspicious} N:${normalN}`,
+            sub: `最終出力${screeningStocks.length}社の内訳`,
+            color: 'text-amber-600',
+          },
         ].map((item, i) => (
           <div key={i} className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
             <div className="text-gray-400 text-xs mb-1">{item.label}</div>
@@ -82,7 +108,9 @@ export default function ScreeningView() {
 
       {/* Freshness bar */}
       <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm flex flex-wrap gap-3 items-center text-sm">
-        <span className="text-gray-500 text-xs font-semibold">鮮度サマリー：</span>
+        <span className="text-gray-500 text-xs font-semibold" title="決算開示日からの経過による分類">
+          財務鮮度サマリー：
+        </span>
         {[
           { label: `fresh ${freshN}`,    cls: freshBadge['fresh'] },
           { label: `normal ${normalFN}`, cls: freshBadge['normal'] },
@@ -91,7 +119,9 @@ export default function ScreeningView() {
         ].map((b, i) => (
           <span key={i} className={`text-xs px-2 py-0.5 rounded font-mono ${b.cls}`}>{b.label}</span>
         ))}
-        <span className="text-gray-300 text-xs ml-auto">実行日: {pipelineMeta.runDate} | プリセット: stable_defensive</span>
+        <span className="text-gray-300 text-xs ml-auto">
+          実行日: {pipelineMeta.runDate} | プリセット: {pipelineMeta.preset ?? '—'}
+        </span>
       </div>
 
       {/* Filter */}
@@ -128,7 +158,13 @@ export default function ScreeningView() {
               <th className="px-4 py-3 text-right"><SortBtn k="dividendYield" label="配当%" /></th>
               <th className="px-4 py-3 text-right"><SortBtn k="deepScore" label="スコア" /></th>
               <th className="px-4 py-3 text-center text-gray-500">罠</th>
-              <th className="px-4 py-3 text-center text-gray-500">鮮度</th>
+              <th
+                className="px-4 py-3 text-center text-gray-500 whitespace-nowrap"
+                title="決算短信が開示されてからの経過。株価の古さではありません（株価はヘッダーの「株価」表示を参照）"
+              >
+                財務鮮度
+                <div className="text-[10px] font-normal text-gray-400">決算開示からの経過</div>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -178,13 +214,24 @@ export default function ScreeningView() {
                     </span>
                     {s.dataSource === 'edinet_db' ? (
                       <>
-                        <span className="text-gray-400 text-xs font-mono">
-                          {daysSince(s.irbankDate) < 999 ? `${daysSince(s.irbankDate)}日前` : '—'}
+                        {(() => {
+                          const e = latestEarnings(s.code);
+                          return e ? (
+                            <span className="text-gray-500 text-xs font-medium whitespace-nowrap">
+                              {e.label} {e.date}
+                            </span>
+                          ) : (
+                            <span className="text-gray-300 text-xs font-mono">{s.irbankDate || '—'}</span>
+                          );
+                        })()}
+                        <span className="text-gray-300 text-[10px] font-mono">
+                          {s.irbankDate && daysSince(s.irbankDate) < 999 ? `${daysSince(s.irbankDate)}日前` : '—'}
                         </span>
-                        <span className="text-gray-300 text-xs font-mono">{s.irbankDate}</span>
                       </>
-                    ) : (
+                    ) : s.dataSource === 'irbank' ? (
                       <span className="text-gray-300 text-xs">—</span>
+                    ) : (
+                      <span className="text-red-600 text-xs font-semibold">財務未取得</span>
                     )}
                   </div>
                 </td>
