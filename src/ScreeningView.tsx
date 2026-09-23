@@ -2,6 +2,9 @@ import { useState } from 'react';
 import { screeningStocks, pipelineMeta } from './data';
 import { latestEarnings } from './earnings';
 import type { TrapFlag, FreshnessTag } from './types';
+import { freshnessOf, freshnessCounts, calendarDaysSince, FRESHNESS_DAYS } from './freshness';
+import SelectionBasis from './SelectionBasis';
+import ScreeningRunButton from './ScreeningRunButton';   // 不要になったらこの行と下の1行を消す
 
 function daysSince(dateStr: string): number {
   const d = new Date(dateStr);
@@ -28,10 +31,16 @@ const freshBadge: Record<FreshnessTag, string> = {
 const dangerous  = screeningStocks.filter(s => s.trapFlag === 'dangerous').length;
 const suspicious = screeningStocks.filter(s => s.trapFlag === 'suspicious').length;
 const normalN    = screeningStocks.filter(s => s.trapFlag === 'normal').length;
-const freshN     = screeningStocks.filter(s => s.freshness === 'fresh').length;
-const normalFN   = screeningStocks.filter(s => s.freshness === 'normal').length;
-const staleN     = screeningStocks.filter(s => s.freshness === 'stale').length;
-const criticalN  = screeningStocks.filter(s => s.freshness === 'critical').length;
+// 鮮度は開示日から毎回計算する。モジュールのトップレベルで1回だけ評価されるため、
+// 日付をまたいでタブを開いたままにしていると古いままになる点だけ注意
+//（リロードで解消する。凍結値と違い data.ts には残らない）。
+const fCounts    = freshnessCounts(screeningStocks);
+// 罠検出10ルールのうち、データが無くて評価できなかった件数。
+// trapFlag='normal' の中身が「確認して問題なし」なのか「測っていない」のかを
+// 区別できるようにするために集計する。
+const TRAP_RULE_COUNT = 10;
+const undeterminedTotal = screeningStocks.reduce((a, s) => a + (s.trapUndetermined?.length ?? 0), 0);
+const fullyCheckedN = screeningStocks.filter(s => (s.trapUndetermined?.length ?? 0) === 0).length;
 
 // pipelineMeta に件数が無い（古い data.ts）場合でも壊れないようにする
 function count(n: number | undefined): string {
@@ -70,6 +79,14 @@ export default function ScreeningView() {
 
   return (
     <div className="space-y-6">
+      {/* この15社がいつ・どの業種を前提に選ばれたか */}
+      <div className="space-y-2">
+        <SelectionBasis />
+        <div className="flex justify-end">
+          <ScreeningRunButton />
+        </div>
+      </div>
+
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
@@ -94,7 +111,7 @@ export default function ScreeningView() {
           {
             label: '罠検出',
             value: `D:${dangerous} S:${suspicious} N:${normalN}`,
-            sub: `最終出力${screeningStocks.length}社の内訳`,
+            sub: `全${TRAP_RULE_COUNT}ルール評価済み ${fullyCheckedN}/${screeningStocks.length}社・判定不能 計${undeterminedTotal}件`,
             color: 'text-amber-600',
           },
         ].map((item, i) => (
@@ -112,10 +129,10 @@ export default function ScreeningView() {
           財務鮮度サマリー：
         </span>
         {[
-          { label: `fresh ${freshN}`,    cls: freshBadge['fresh'] },
-          { label: `normal ${normalFN}`, cls: freshBadge['normal'] },
-          { label: `stale ${staleN}`,    cls: freshBadge['stale'] },
-          { label: `critical ${criticalN}`, cls: freshBadge['critical'] },
+          { label: `fresh ${fCounts.fresh}`,       cls: freshBadge['fresh'] },
+          { label: `normal ${fCounts.normal}`,     cls: freshBadge['normal'] },
+          { label: `stale ${fCounts.stale}`,       cls: freshBadge['stale'] },
+          { label: `critical ${fCounts.critical}`, cls: freshBadge['critical'] },
         ].map((b, i) => (
           <span key={i} className={`text-xs px-2 py-0.5 rounded font-mono ${b.cls}`}>{b.label}</span>
         ))}
@@ -179,14 +196,9 @@ export default function ScreeningView() {
               >
                 <td className="px-4 py-3 font-mono text-gray-400 text-xs">{s.rank}</td>
                 <td className="px-4 py-3 font-mono text-emerald-600 font-bold">{s.code}</td>
-                <td className="px-4 py-3 text-gray-800 font-medium whitespace-nowrap">
-                  {s.name}
-                  {s.deepScore >= 70 && (
-                    <span className="ml-2 text-xs bg-emerald-50 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded">
-                      深掘り対象
-                    </span>
-                  )}
-                </td>
+                {/* 「深掘り対象」バッジは廃止。この表の15社は全社がEDINET深掘り済みで、
+                    バッジの閾値(70点)と深掘りタブの表示条件(90点)が食い違っていた。 */}
+                <td className="px-4 py-3 text-gray-800 font-medium whitespace-nowrap">{s.name}</td>
                 <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">{s.industry}</td>
                 <td className="px-4 py-3 text-right font-mono text-gray-800 font-semibold">{s.price.toLocaleString()}</td>
                 <td className="px-4 py-3 text-right font-mono text-gray-600">
@@ -209,9 +221,14 @@ export default function ScreeningView() {
                 </td>
                 <td className="px-4 py-3 text-center">
                   <div className="flex flex-col items-center gap-0.5">
-                    <span className={`text-xs px-2 py-0.5 rounded font-mono ${freshBadge[s.freshness]}`}>
-                      {s.freshness}
-                    </span>
+                    {(() => {
+                      const tag = freshnessOf(s.irbankDate);
+                      return (
+                        <span className={`text-xs px-2 py-0.5 rounded font-mono ${freshBadge[tag]}`}>
+                          {tag}
+                        </span>
+                      );
+                    })()}
                     {s.dataSource === 'edinet_db' ? (
                       <>
                         {(() => {
@@ -241,10 +258,43 @@ export default function ScreeningView() {
         </table>
       </div>
 
+      {/* 判定不能の一覧。該当ゼロを「問題なし」と読ませないための表示 */}
+      {undeterminedTotal > 0 && (
+        <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
+          <h3 className="text-gray-700 font-bold mb-1 text-sm">? 判定不能だったルール</h3>
+          <p className="text-gray-400 text-xs mb-3">
+            データが取得できず評価していない項目です。「問題なし」ではありません。
+            罠フラグが normal でも、ここに項目がある銘柄は一次資料での確認が必要です。
+          </p>
+          <div className="space-y-2.5">
+            {screeningStocks
+              .filter(s => (s.trapUndetermined?.length ?? 0) > 0)
+              .map(s => (
+                <div key={s.code} className="flex gap-3 items-start text-sm">
+                  <span className="text-xs px-2 py-0.5 rounded font-mono shrink-0 bg-gray-100 text-gray-500 border border-gray-200">
+                    {s.trapUndetermined?.length}件
+                  </span>
+                  <div>
+                    <span className="text-gray-800 font-medium">{s.name}（{s.code}）</span>
+                    <ul className="mt-1 space-y-0.5">
+                      {s.trapUndetermined?.map((u, i) => (
+                        <li key={i} className="text-gray-500 text-xs">• {u}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+
       {/* Trap details */}
       {screeningStocks.filter(s => s.trapReasons.length > 0).length > 0 && (
         <div className="bg-white border border-amber-200 rounded-xl p-5 shadow-sm">
-          <h3 className="text-amber-700 font-bold mb-3 text-sm">⚠ 罠検出銘柄の詳細</h3>
+          <h3 className="text-amber-700 font-bold mb-1 text-sm">⚠ 罠検出に該当した銘柄</h3>
+          <p className="text-gray-400 text-xs mb-3">
+            {TRAP_RULE_COUNT}ルールのうち該当したものとその根拠。該当1件で suspicious（−15点）、2件以上で dangerous（−30点）。
+          </p>
           <div className="space-y-3">
             {screeningStocks.filter(s => s.trapReasons.length > 0).map(s => (
               <div key={s.code} className="flex gap-3 items-start text-sm">

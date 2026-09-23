@@ -21,7 +21,9 @@
 
 ### 1c. マクロ→業種の自動絞り込み接続＋可視化
 - `vite-plugin-macro.ts`：Claude出力スキーマに `targetSectors`/`avoidSectors` 追加（JPX33業種コード表内蔵・バリデーション・data.ts書き戻し）。
-- `src/data.ts`：`generatedCommand` を `targetSectors` から自動生成（`--industries` が自動追従）。
+- `src/data.ts`：スクリーニングコマンドを `targetSectors` から自動生成（`--industries` が自動追従）。
+  2026-09-23 に `generatedCommand` → `screeningCommandArgs` へ改名し、Python の実行コマンド名は
+  `GET /api/env` から取得する方式に変更（`data.ts` に OS 依存の値を焼き込まないため・BUG-019）。
 - `src/MacroView.tsx`：「🎯 現在スクリーニングで絞り込む業種」チップを追加。
 
 ### 検証済み

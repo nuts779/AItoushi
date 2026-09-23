@@ -1,39 +1,19 @@
-import { pipelineMeta, screeningStocks } from './data';
-import type { FreshnessTag } from './types';
+import { pipelineMeta, screeningStocks, macroMeta } from './data';
 import { isUnavailable } from './dataSource';
+import {
+  businessDaysSince, calendarDaysSince, freshnessCounts,
+  PRICE_BIZ_DAYS, MACRO_DAYS,
+} from './freshness';
 
 /**
- * 鮮度バナー（株価 / 財務の2系統）
+ * 鮮度バナー（株価 / 財務 / マクロの3系統）
  *
- * 株価は毎営業日動き、財務は四半期に一度しか変わらない。
- * 1つの日付で両方を代表させると、閾値をどちらに合わせても
- * もう一方の鮮度が必ず嘘になるため、別々に判定する。
+ * 株価は毎営業日動き、財務は四半期に一度、マクロは週単位で変わる。
+ * 1つの日付でまとめて代表させると、閾値をどれに合わせても
+ * 他の鮮度が必ず嘘になるため、別々に判定する。
+ *
+ * 判定に使う日数計算としきい値は freshness.ts に集約している。
  */
-
-// 土日を除いた経過営業日数。
-// 祝日は考慮していないが、祝日を営業日として数えるぶん経過日数は多めに出る。
-// 「実際より古く見える」方向の誤差なので、鮮度判定としては安全側に倒れる。
-function businessDaysSince(isoDate: string): number {
-  const from = new Date(isoDate + 'T00:00:00');
-  const to = new Date();
-  to.setHours(0, 0, 0, 0);
-  if (isNaN(from.getTime()) || to < from) return 0;
-
-  let days = 0;
-  const cursor = new Date(from);
-  while (cursor < to) {
-    cursor.setDate(cursor.getDate() + 1);
-    const dow = cursor.getDay();
-    if (dow !== 0 && dow !== 6) days++;
-  }
-  return days;
-}
-
-function calendarDaysSince(isoDate: string): number {
-  const d = new Date(isoDate + 'T00:00:00');
-  if (isNaN(d.getTime())) return 9999;
-  return Math.floor((Date.now() - d.getTime()) / 86400000);
-}
 
 type Level = 'fresh' | 'warn' | 'alert';
 
@@ -72,26 +52,38 @@ export default function FreshnessBanner() {
   // 金曜終値は月曜時点でカレンダー3日前だが、営業日では1日前。
   // カレンダー日数で判定すると毎週月曜に必ず警告が出てしまう。
   const priceDate = pipelineMeta.priceDate ?? pipelineMeta.runDate;
-  const priceBizDays = businessDaysSince(priceDate);
-  const priceLevel: Level = priceBizDays <= 2 ? 'fresh' : priceBizDays <= 4 ? 'warn' : 'alert';
+  const priceBizDays = businessDaysSince(priceDate) ?? 9999;
+  const priceLevel: Level =
+    priceBizDays <= PRICE_BIZ_DAYS.fresh ? 'fresh'
+    : priceBizDays <= PRICE_BIZ_DAYS.warn ? 'warn'
+    : 'alert';
   const priceHeadline =
     priceBizDays <= 0 ? '本日' : `${priceBizDays}営業日前`;
   const priceFailed = pipelineMeta.priceFailedCount ?? 0;
 
   // ── 財務：カレンダー日数で判定する（決算サイクルに合わせる） ──
-  const fundDays = calendarDaysSince(pipelineMeta.runDate);
+  const fundDays = calendarDaysSince(pipelineMeta.runDate) ?? 9999;
   const fundLevel: Level =
     fundDays <= pipelineMeta.staleWarnDays ? 'fresh'
     : fundDays <= pipelineMeta.staleAlertDays ? 'warn'
     : 'alert';
 
-  const counts = screeningStocks.reduce((acc, st) => {
-    acc[st.freshness] = (acc[st.freshness] ?? 0) + 1;
-    return acc;
-  }, {} as Record<FreshnessTag, number>);
-  const critical = counts.critical ?? 0;
-  const stale = counts.stale ?? 0;
+  // 銘柄ごとの鮮度は開示日から今日を基準に計算する（data.ts の凍結値は使わない）
+  const counts = freshnessCounts(screeningStocks);
+  const critical = counts.critical;
+  const stale = counts.stale;
   const unavailable = screeningStocks.filter(st => isUnavailable(st.dataSource)).length;
+
+  // ── マクロ：カレンダー日数で判定する（週末更新の運用リズムに合わせる） ──
+  // 分析の実行日を持たない古い data.ts では判定できないため「不明」と出す。
+  // 記事日付で代用すると、1か月前の分析でも記事が新しければ緑になってしまう。
+  const macroDate = macroMeta.generatedDate ?? null;
+  const macroDays = calendarDaysSince(macroDate);
+  const macroLevel: Level =
+    macroDays === null ? 'alert'
+    : macroDays <= MACRO_DAYS.fresh ? 'fresh'
+    : macroDays <= MACRO_DAYS.warn ? 'warn'
+    : 'alert';
 
   const fundIssues: string[] = [];
   if (unavailable > 0) fundIssues.push(`未取得${unavailable}件`);
@@ -117,6 +109,23 @@ export default function FreshnessBanner() {
         headline={fundDays <= 0 ? '本日' : `${fundDays}日前`}
         detail={fundIssues.length > 0 ? fundIssues.join('・') : pipelineMeta.runDate}
         title={`スクリーニング実行日: ${pipelineMeta.runDate}（${fundDays}日前） / ${pipelineMeta.fundamentalSource}`}
+      />
+      <Pill
+        label="マクロ"
+        level={macroLevel}
+        headline={
+          macroDays === null ? '実行日不明'
+          : macroDays <= 0 ? '本日'
+          : `${macroDays}日前`
+        }
+        detail={macroDate ?? '再実行してください'}
+        title={
+          macroDate
+            ? `マクロ分析の実行日: ${macroDate}（${macroDays}日前）\n`
+              + `参考記事の最新日: ${macroMeta.latestArticleDate}\n`
+              + `目標は${MACRO_DAYS.fresh}日以内（週末更新）。絞り込み業種はこの分析に連動します`
+            : 'この data.ts には分析の実行日が記録されていません。マクロ分析を再実行すると記録されます'
+        }
       />
     </div>
   );

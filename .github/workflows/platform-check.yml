@@ -1,0 +1,73 @@
+# Windows と macOS の両方で動くことを機械的に確かめるワークフロー。
+#
+# なぜ必要か:
+#   このプロジェクトは Windows と macOS の両方で開発・実行される（CLAUDE.md の最重要ルール）。
+#   しかし開発者はそれぞれ片方の OS しか持っていないため、
+#   「自分の環境では動いた」で終わると BUG-018 のようにもう片方が丸ごと動かなくなる。
+#   GitHub が数分だけ貸してくれる Windows / macOS のマシンで同じチェックを走らせ、
+#   両方が緑になることを確認する。
+#
+# 課金:
+#   このリポジトリは公開なので Actions の実行時間は無料・無制限。
+#   EDINET の APIキーは使わない（シークレット未設定でも動く）。ネットワークにも出ない。
+#
+# このワークフローで確認できないもの（Windows メンバーの実機確認が必要）:
+#   - Microsoft Store の「アプリ実行エイリアス」の挙動（デスクトップ版 Windows 固有）
+#   - conda / venv ラッパーの .bat 経由での Python 起動
+name: platform-check
+
+on:
+  push:
+    branches: [windows-check]
+  pull_request:
+  workflow_dispatch:   # GitHub の画面から手動実行するため
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false   # 片方が落ちてももう片方の結果を見たい
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 依存をインストール
+        run: npm ci
+
+      - name: Python の依存をインストール
+        run: pip install -r requirements.txt
+
+      - name: 型チェック
+        run: npx tsc --noEmit
+
+      - name: ビルド
+        run: npx vite build
+
+      - name: Python 全スクリプトの構文チェック
+        run: python -m compileall -q scripts
+
+      - name: タイムゾーン（tzdata あり）
+        run: python scripts/tests/tz_check.py
+
+      # Windows は OS のタイムゾーンDBを持たないため、tzdata を入れ忘れた状態が
+      # 現実に起こりうる。その状態でも株価の基準日が同じになることを確かめる。
+      - name: タイムゾーン（tzdata を外した状態）
+        if: runner.os == 'Windows'
+        run: |
+          pip uninstall -y tzdata
+          python scripts/tests/tz_check.py
+
+      - name: OS依存箇所の実機チェック
+        run: node scripts/tests/platform_check.mjs

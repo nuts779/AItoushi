@@ -62,10 +62,13 @@ src/data.ts（静的データ）
     ├─ economistReports → MacroView（3エコノミストカード）
     ├─ targetSectors    → MacroView（狙うセクター）
     ├─ avoidSectors     → MacroView（避けるセクター）
-    ├─ generatedCommand → MacroView（実行コマンド）
-    ├─ screeningStocks  → ScreeningView（スクリーニングテーブル）
-    ├─ deepStocks       → DeepDiveView（銘柄カード）
-    └─ portfolioPositions → PortfolioView（ポジション一覧）
+    ├─ screeningCommandArgs → MacroView（実行コマンドの引数部分。Python の実行コマンド名は
+    │                        GET /api/env から取得して付与する。BUG-019 参照）
+    ├─ screeningStocks  → ScreeningView（テーブル）/ DeepDiveView（銘柄カード）
+    ├─ edinetDetails    → PortfolioView（財務一覧）/ 一次資料リンク
+    ├─ pipelineMeta     → 鮮度バナー（株価・財務）・サマリーカード
+    ├─ macroMeta        → 鮮度バナー（マクロ）・MacroView
+    └─ portfolioPositions → PortfolioView（ポジション一覧・現在は空）
 ```
 
 ---
@@ -116,16 +119,15 @@ deepScore = score（1段階目）
 |---|---|
 | TrapFlag | `'normal' \| 'suspicious' \| 'dangerous'` |
 | FreshnessTag | `'fresh' \| 'normal' \| 'stale' \| 'critical'` |
-| VerdictRating | `'strong_buy' \| 'buy' \| 'watch' \| 'avoid'` |
 | WeatherType | `'晴れ' \| '曇り' \| '嵐'` |
 | Tab | `'macro' \| 'screening' \| 'deepdive' \| 'portfolio'` |
-| Stock | スクリーニング結果の銘柄データ |
-| DeepStock | Stock を拡張した深掘り分析データ |
+| Stock | スクリーニング結果の銘柄データ（鮮度タグは持たない。BUG-013） |
 | ScoreBreakdown | 6項目スコアの内訳 |
 | EconomistReport | エコノミストレポートデータ |
 | TargetSector | 狙うセクターデータ |
 | AvoidSector | 避けるセクターデータ |
-| PortfolioPosition | ポートフォリオポジションデータ |
+| PortfolioPosition | 保有ポジション（推奨・評価は持たない。BUG-008） |
+| EdinetDetail | EDINET財務詳細と一次資料URL |
 
 ---
 
@@ -139,8 +141,14 @@ deepScore = score（1段階目）
 | DeepDiveView | src/DeepDiveView.tsx | ステップ3：銘柄深掘り分析カード |
 | StockCard | src/DeepDiveView.tsx（内部） | 個別銘柄カード（展開/折りたたみ） |
 | ScoreBar | src/DeepDiveView.tsx（内部） | 6項目スコアのバー表示 |
-| YoY | src/DeepDiveView.tsx（内部） | 前年同期比の色分け表示 |
+| TrapPanel | src/DeepDiveView.tsx（内部） | 罠検出の該当／判定不能／確認済みの内訳表示 |
 | PortfolioView | src/PortfolioView.tsx | ポートフォリオ管理画面 |
+| PositionCard | src/PortfolioView.tsx（内部） | 保有1件の表示（損益のみ・評価は出さない） |
+| EmptyPortfolio | src/PortfolioView.tsx（内部） | 保有未登録時の説明と登録方法 |
+| SourceLinks | src/SourceLinks.tsx | 一次資料（有報・決算短信PDF）へのリンク |
+| （モジュール） | src/freshness.ts | 鮮度の日数計算としきい値。全画面がここだけを使う |
+| SelectionBasis | src/SelectionBasis.tsx | 選定時の業種と現在のマクロ推奨業種の突き合わせ |
+| ScreeningRunButton | src/ScreeningRunButton.tsx | フルスクリーニングの実行（確認ダイアログ付き・`screening_run_button.md`） |
 
 ---
 
@@ -170,4 +178,9 @@ deepScore = score（1段階目）
 | ~~L-07~~ | ~~`update_data.py` が `edinetDetails` を更新しない~~ → **2026-09-02 解消**。`fetch_stocks.py` が EDINET の財務詳細を `screening_result.json` に保存し、`update_data.py` が `edinetDetails` を再生成するようにした | 済 |
 | ~~L-09~~ | ~~スクリーニング画面のサマリーカードが固定値~~ → **2026-09-03 解消**（BUG-005）。`screening_meta.json` 経由で実測値を表示 | 済 |
 | L-08 | **2026-09-04 一部解消**。6項目評価のうち②モメンタム・④バリュエーション・⑤下値リスク・⑥配当（計65点ぶん）を実装し画面に表示。①カタリスト（決算発表予定日が未取得）と③需給・テクニカル（信用倍率・出来高が未取得）は「未算出」表示のまま。決算サマリー・プラス材料/リスク・最終評価も未実装 | 中 |
-| L-10 | `deepStocks` / `DeepStock` 型が `data.ts` に残っているが未参照。旧サンプルデータのため整理が必要 | 低 |
+| ~~L-10~~ | ~~`deepStocks` / `DeepStock` 型が未参照のまま残っている~~ → **2026-09-10 解消**（BUG-008）。手書きの `verdict` / `positives` / `risks` を抱えていたため型ごと削除 | 済 |
+| L-11 | ポートフォリオの保有銘柄は `src/data.ts` の手書き。`update_data.py` の更新対象外のため、スクリーニングを回しても連動しない（BUG-008 で架空データは撤去済み・登録UIは L-04） | 中 |
+| ~~L-14~~ | ~~銘柄の入れ替えがUIから実行できない~~ → **2026-09-17 解消**。`ScreeningRunButton` を追加（確認ダイアログ・同日2回目のガード・実行前バックアップ付き）。詳細は `screening_run_button.md` | 済 |
+| L-15 | `refresh_prices.py` は score / deepScore / scoreBreakdown を再計算しないため、株価更新後は PER・PBR と④バリュエーション点が一時的に食い違う | 中 |
+| L-13 | 鮮度の集計はモジュールのトップレベルで1度だけ評価されるため、日付をまたいでタブを開きっぱなしにすると前日の表示のままになる（リロードで解消。凍結値ではないので保存はされない） | 低 |
+| L-12 | 罠検出10ルールのうち「のれんの規模」「有利子負債の水準」は中小型株でXBRLタグ付けが無く判定不能になりやすい（実測: のれん11/15社・有利子負債8/15社が判定不能）。有報本文のパースか他ソースが必要 | 中 |

@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
-import { economistReports, targetSectors, avoidSectors, weather, weatherDetail, generatedCommand, macroMeta } from './data';
+import { economistReports, targetSectors, avoidSectors, weather, weatherDetail, screeningCommandArgs, macroMeta } from './data';
+import { calendarDaysSince, MACRO_DAYS } from './freshness';
+import { usePythonEnv, buildCommand, PythonBinNote } from './pythonCommand';
 
 const weatherConfig = {
   '晴れ': { icon: '☀️', bg: 'bg-emerald-50', border: 'border-emerald-300', text: 'text-emerald-700', sub: 'text-emerald-500' },
@@ -19,8 +21,14 @@ export default function MacroView() {
   const cfg = weatherConfig[weather];
   const logBoxRef = useRef<HTMLDivElement>(null);
 
+  // Python の実行コマンド名は OS で違うため、サーバ（自分の npm run dev）に問い合わせる
+  const pyEnv = usePythonEnv();
+  const screeningCommand = buildCommand(pyEnv.bin, screeningCommandArgs);
+
   const handleCopy = () => {
-    navigator.clipboard.writeText(generatedCommand);
+    // 表示している文字列と同じものをコピーする。
+    // python3 を固定で入れると Windows のメンバーが貼っても動かない（BUG-019）。
+    navigator.clipboard.writeText(screeningCommand);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -122,9 +130,33 @@ export default function MacroView() {
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-bold text-gray-900">3エコノミスト分析</h2>
           <div className="flex items-center gap-3">
+            {/* 記事の日付と、分析を走らせた日は別物。
+                記事が新しくても分析が1か月前ということがあるため両方出す。 */}
             <div className="text-right">
               <div className="text-gray-400 text-xs">参考記事の最新日</div>
               <div className="text-gray-700 text-sm font-mono font-semibold">{macroMeta.latestArticleDate}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-gray-400 text-xs">この分析の実行日</div>
+              {(() => {
+                const d = macroMeta.generatedDate ?? null;
+                const days = calendarDaysSince(d);
+                const cls =
+                  days === null ? 'text-red-500'
+                  : days <= MACRO_DAYS.fresh ? 'text-emerald-600'
+                  : days <= MACRO_DAYS.warn ? 'text-amber-600'
+                  : 'text-red-500';
+                return (
+                  <div className={`text-sm font-mono font-semibold ${cls}`}>
+                    {d ?? '不明'}
+                    {days !== null && (
+                      <span className="text-xs font-normal ml-1">
+                        （{days <= 0 ? '本日' : `${days}日前`}）
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
             <button
               onClick={handleMacroFetch}
@@ -354,12 +386,16 @@ export default function MacroView() {
         </div>
 
         <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 font-mono text-sm text-emerald-700 mb-3 break-all">
-          {generatedCommand}
+          {screeningCommand}
         </div>
+        <PythonBinNote env={pyEnv} />
         <div className="flex items-center justify-between">
           <p className="text-gray-500 text-xs">
-            PowerShellで ~/stock-analysis/ に移動後、上記を実行してください。<br />
-            結果の final_ranking.csv 全件をステップ2に貼り付けてください。
+            プロジェクトのフォルダで、ターミナル
+            （Windows は PowerShell / コマンドプロンプト、macOS はターミナル）から上記を実行してください。<br />
+            完了後に <code className="font-mono">{pyEnv.bin} scripts/update_data.py</code> を実行すると
+            ステップ2の一覧に反映されます。
+            「スクリーニング」タブの「銘柄を選び直す」ボタンからも同じ処理を実行できます。
           </p>
           <button
             onClick={handleCopy}

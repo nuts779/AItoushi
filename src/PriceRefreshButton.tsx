@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { usePythonEnv } from './pythonCommand';
 
 /**
  * 株価だけを取り直すボタン。
@@ -13,6 +14,8 @@ export default function PriceRefreshButton() {
   const [logs, setLogs] = useState<string[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  // 案内文に出す Python コマンド名。OS で違うため決め打ちしない（BUG-019）
+  const pyEnv = usePythonEnv();
 
   const run = async () => {
     setStatus('running');
@@ -123,7 +126,9 @@ export default function PriceRefreshButton() {
           )}
           {status === 'error' && (
             <div className="text-[11px] text-red-700">
-              Python が実行できるか確認してください（既定: python3）。
+              <code className="font-mono">{pyEnv.bin}</code> が実行できるか確認してください
+              {pyEnv.source === 'guess' && <>（この名前はブラウザの OS からの推定です）</>}。
+              別の名前で入っている場合は環境変数 <code className="font-mono">PYTHON</code> で指定できます。
             </div>
           )}
         </div>

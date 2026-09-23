@@ -1,0 +1,18 @@
+# Python 依存パッケージ
+#   Windows / macOS 両対応（CLAUDE.md「クロスプラットフォーム対応」参照）
+#
+# インストール:
+#   Windows : py -m pip install -r requirements.txt
+#   macOS   : python3 -m pip install -r requirements.txt --user --break-system-packages
+#             （Homebrew の Python は PEP 668 で外部管理のため）
+
+requests>=2.31        # EDINET DB / JPX からの取得
+pandas>=2.0           # JPX銘柄マスター(Excel)の読み込み
+openpyxl>=3.1         # data_j.xlsx を読むために pandas が必要とする
+yfinance>=0.2.40      # 株価・PER・PBR・配当（非公式）
+
+# Windows には OS のタイムゾーンDBが無く、zoneinfo が動かない。
+#   これが無いと scripts/fetch_stocks.py の quote_date() が
+#   株価の基準日を判定できず、鮮度表示が実際より新しくなる（BUG-018）。
+#   東証は固定オフセットで代替するため致命的ではないが、入れておくのが正しい。
+tzdata; platform_system == "Windows"

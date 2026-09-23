@@ -40,6 +40,7 @@ def main() -> int:
     print(f'=== 株価更新開始（{len(stocks)}銘柄）===\n')
 
     updated, failed = 0, []
+    quote_dates = []      # 取得できた株価が「いつ時点か」
     for s in stocks:
         code = s['code']
         fresh = fetch_yfinance(code)
@@ -53,6 +54,9 @@ def main() -> int:
         for key in PRICE_FIELDS:
             if key in fresh:
                 s[key] = fresh[key]
+        if fresh.get('price_date'):
+            quote_dates.append(fresh['price_date'])
+            s['price_date'] = fresh['price_date']
 
         diff = ''
         if old_price:
@@ -71,12 +75,19 @@ def main() -> int:
             meta = json.load(f)
     except FileNotFoundError:
         meta = {}
-    meta['priceDate'] = date.today().isoformat()
+    # 実行日ではなく、実際に値が付いた日を記録する。
+    # 夜間や休日に実行すると date.today() は前営業日の終値に当日の日付を貼ってしまい、
+    # 鮮度バナーが1日ぶん新しく見える。銘柄ごとに差が出た場合はいちばん古い日を採る
+    # （「全銘柄が少なくともこの日時点」と言える側に倒す）。
+    meta['priceDate'] = min(quote_dates) if quote_dates else date.today().isoformat()
     meta['priceFailedCount'] = len(failed)
+    if quote_dates and min(quote_dates) != max(quote_dates):
+        print(f'  ※ 銘柄によって株価の基準日が異なります（{min(quote_dates)}〜{max(quote_dates)}）。'
+              f'いちばん古い {min(quote_dates)} を鮮度判定に使います。')
     with open(META_PATH, 'w', encoding='utf-8') as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    print(f'\n更新: {updated}銘柄 / 失敗: {len(failed)}銘柄')
+    print(f'\n更新: {updated}銘柄 / 失敗: {len(failed)}銘柄 / 株価基準日: {meta["priceDate"]}')
     if failed:
         print(f'  失敗した銘柄: {", ".join(failed)}（前回の株価が残っています）')
 

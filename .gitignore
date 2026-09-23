@@ -16,3 +16,6 @@ scripts/cache/
 scripts/screening_result.json
 scripts/screening_meta.json
 scripts/macro_raw.txt
+
+# フルスクリーニング実行前の自動バックアップ（ローカル専用）
+scripts/backup/

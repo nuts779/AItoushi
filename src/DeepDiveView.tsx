@@ -3,6 +3,8 @@ import { screeningStocks, pipelineMeta } from './data';
 import type { Stock, TrapFlag, ScoreBreakdown } from './types';
 import { sourceStyle, isUnavailable } from './dataSource';
 import { latestEarnings } from './earnings';
+import { SourceLinksByCode } from './SourceLinks';
+import { freshnessOf, calendarDaysSince, FRESHNESS_DAYS } from './freshness';
 
 const trapBadge: Record<TrapFlag, { cls: string; label: string }> = {
   normal:    { cls: 'bg-emerald-50 text-emerald-700 border border-emerald-200', label: '✓ normal' },
@@ -10,22 +12,20 @@ const trapBadge: Record<TrapFlag, { cls: string; label: string }> = {
   dangerous: { cls: 'bg-red-50    text-red-700    border border-red-200',     label: '✕ dangerous' },
 };
 
-function daysSince(dateStr: string): number {
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return 999;
-  return Math.floor((Date.now() - d.getTime()) / 86400000);
-}
+// 鮮度の閾値・計算は freshness.ts に集約している（画面ごとに持つとずれる）
+const tagColor = {
+  fresh:    'text-emerald-600',
+  normal:   'text-blue-600',
+  stale:    'text-amber-600',
+  critical: 'text-red-500',
+} as const;
 
 function FreshnessLabel({ code, irbankDate, dataSource }: { code: string; irbankDate: string; dataSource?: string }) {
-  const days = daysSince(irbankDate);
+  const days = calendarDaysSince(irbankDate);
   const style = sourceStyle(dataSource);
   const earnings = latestEarnings(code);
-
-  let color = 'text-emerald-600';
-  let tag   = 'fresh';
-  if      (days > 90) { color = 'text-red-500';    tag = 'critical'; }
-  else if (days > 60) { color = 'text-amber-600';  tag = 'stale'; }
-  else if (days > 30) { color = 'text-blue-600';   tag = 'normal'; }
+  const tag = freshnessOf(irbankDate);
+  const color = tagColor[tag];
 
   return (
     <span className="flex items-center gap-1.5 flex-wrap">
@@ -34,7 +34,7 @@ function FreshnessLabel({ code, irbankDate, dataSource }: { code: string; irbank
         <span className="text-xs text-gray-500 font-medium">{earnings.label} {earnings.date}</span>
       )}
       <span className={`text-xs font-mono font-semibold ${color}`}>
-        {!irbankDate ? '基準日なし' : days > 0 ? `${days}日前` : '本日取得'}
+        {days === null ? '基準日なし' : days > 0 ? `${days}日前` : '本日取得'}
       </span>
       <span className={`text-xs ${color}`}>[{tag}]</span>
     </span>
@@ -146,12 +146,65 @@ function ScorePanel({ breakdown }: { breakdown?: ScoreBreakdown }) {
   );
 }
 
+// 罠検出10ルールの結果。3つの状態を必ず描き分ける。
+//   ・該当     … 減点された理由
+//   ・判定不能 … データが無くて測れなかったルールと、その理由
+//   ・確認済み … 実際に評価して問題が無かった件数
+// 判定不能を黙って隠すと「罠なしを確認できた」ように見えてしまうため、
+// 件数と理由を必ず画面に出す（本プロジェクトの原則③）。
+const TRAP_RULE_COUNT = 10;
+
+function TrapPanel({ s }: { s: Stock }) {
+  const reasons = s.trapReasons ?? [];
+  const undetermined = s.trapUndetermined ?? [];
+  const checked = Math.max(0, TRAP_RULE_COUNT - reasons.length - undetermined.length);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between">
+        <h4 className="text-gray-700 font-semibold text-sm">罠検出（{TRAP_RULE_COUNT}ルール）</h4>
+        <span className="text-xs font-mono text-gray-500">
+          該当 {reasons.length} · 判定不能 {undetermined.length} · 確認済み {checked}
+        </span>
+      </div>
+
+      {reasons.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <div className="text-amber-700 font-semibold text-xs mb-1.5">⚠ 該当した項目</div>
+          {reasons.map((r, i) => (
+            <p key={i} className="text-amber-700 text-xs">• {r}</p>
+          ))}
+        </div>
+      )}
+
+      {undetermined.length > 0 && (
+        <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+          <div className="text-gray-600 font-semibold text-xs mb-1.5">
+            ? 判定不能（データが無く評価していない項目）
+          </div>
+          {undetermined.map((u, i) => (
+            <p key={i} className="text-gray-500 text-xs">• {u}</p>
+          ))}
+          <p className="text-gray-400 text-[10px] mt-1.5">
+            これらは「問題なし」ではなく「測っていない」項目です。一次資料での確認が必要です。
+          </p>
+        </div>
+      )}
+
+      {reasons.length === 0 && undetermined.length === 0 && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-700">
+          ✓ {TRAP_RULE_COUNT}ルールすべてを評価し、該当はありませんでした。
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StockCard({ s, expanded, onToggle }: { s: Stock; expanded: boolean; onToggle: () => void }) {
   const downPct   = (((s.price - s.high52w) / s.high52w) * 100).toFixed(1);
   const posFromLow = s.high52w > 0
     ? Math.round(((s.price - s.high52w * 0.7) / (s.high52w - s.high52w * 0.7)) * 100)
     : 0;
-  const days      = daysSince(s.irbankDate);
   const trap      = trapBadge[s.trapFlag];
 
   return (
@@ -248,15 +301,8 @@ function StockCard({ s, expanded, onToggle }: { s: Stock; expanded: boolean; onT
               </div>
             </div>
 
-            {/* 罠検出結果 */}
-            {s.trapReasons.length > 0 && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
-                <h4 className="text-amber-700 font-semibold text-sm mb-2">⚠ 罠検出理由</h4>
-                {s.trapReasons.map((r, i) => (
-                  <p key={i} className="text-amber-700 text-xs">• {r}</p>
-                ))}
-              </div>
-            )}
+            {/* 罠検出結果。該当・判定不能・確認済みを必ず区別して出す */}
+            <TrapPanel s={s} />
           </div>
 
           {/* Right: 株価ポジションとデータ情報 */}
@@ -297,17 +343,29 @@ function StockCard({ s, expanded, onToggle }: { s: Stock; expanded: boolean; onT
                   {sourceStyle(s.dataSource).label}
                 </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">財務データ基準日</span>
-                <span className={`font-mono ${!s.irbankDate || daysSince(s.irbankDate) > 90 ? 'text-red-500 font-semibold' : 'text-gray-700'}`}>
-                  {s.irbankDate ? `${s.irbankDate}（${daysSince(s.irbankDate)}日前）` : '取得できていません'}
-                </span>
+              {(() => {
+                const d = calendarDaysSince(s.irbankDate);
+                const tooOld = d === null || d > FRESHNESS_DAYS.stale;
+                return (
+                  <>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">財務データ基準日</span>
+                      <span className={`font-mono ${tooOld ? 'text-red-500 font-semibold' : 'text-gray-700'}`}>
+                        {d === null ? '取得できていません' : `${s.irbankDate}（${d}日前）`}
+                      </span>
+                    </div>
+                    {d !== null && d > FRESHNESS_DAYS.stale && (
+                      <div className="text-amber-600 bg-amber-50 rounded p-2 mt-1">
+                        ⚠ 財務データが{FRESHNESS_DAYS.stale}日超経過。最新決算との乖離の可能性あり。
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+              <div className="pt-2 border-t border-gray-200">
+                <div className="text-gray-500 mb-1.5">一次資料で確認する</div>
+                <SourceLinksByCode code={s.code} size="md" showTitle />
               </div>
-              {daysSince(s.irbankDate) > 90 && (
-                <div className="text-amber-600 bg-amber-50 rounded p-2 mt-1">
-                  ⚠ 財務データが90日超経過。最新決算との乖離の可能性あり。
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -317,13 +375,17 @@ function StockCard({ s, expanded, onToggle }: { s: Stock; expanded: boolean; onT
 }
 
 export default function DeepDiveView() {
-  const targets = screeningStocks.filter(s => s.deepScore >= 90);
+  // スクリーニングの最終出力はすべてEDINETで深掘り済みなので、点数で絞らない。
+  // 以前は deepScore >= 90 で絞っていたが、罠検出で減点された銘柄
+  //（＝いちばん詳しく見たい銘柄）がここから消えてしまっていた。
+  const targets = screeningStocks;
   const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
   const toggle = (i: number) => setExpandedIdx(prev => prev === i ? null : i);
 
   const edinetCount      = targets.filter(s => s.dataSource === 'edinet_db').length;
   const irbankCount      = targets.filter(s => s.dataSource === 'irbank').length;
   const unavailableCount = targets.filter(s => isUnavailable(s.dataSource)).length;
+  const trapHitCount     = targets.filter(s => (s.trapReasons?.length ?? 0) > 0).length;
 
   return (
     <div className="space-y-6">
@@ -333,8 +395,8 @@ export default function DeepDiveView() {
           <div>
             <div className="text-gray-900 font-bold">深掘り分析対象</div>
             <div className="text-gray-500 text-xs mt-0.5">
-              deepScore 90以上 · {targets.length}社 ·
-              スクリーニング実行日: {pipelineMeta.runDate}
+              スクリーニング最終出力 {targets.length}社（全社EDINET深掘り済み） ·
+              実行日: {pipelineMeta.runDate}
             </div>
           </div>
           <div className="flex gap-3 text-xs flex-wrap">
@@ -349,6 +411,11 @@ export default function DeepDiveView() {
             {unavailableCount > 0 && (
               <span className="bg-red-50 text-red-700 border border-red-200 px-2 py-1 rounded font-bold">
                 財務未取得 {unavailableCount}社
+              </span>
+            )}
+            {trapHitCount > 0 && (
+              <span className="bg-amber-50 text-amber-700 border border-amber-200 px-2 py-1 rounded font-bold">
+                罠検出あり {trapHitCount}社
               </span>
             )}
           </div>

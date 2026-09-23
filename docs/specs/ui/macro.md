@@ -89,7 +89,9 @@
 | 絞り込み業種サマリー | コマンド上部に「🎯 現在スクリーニングで絞り込む業種」を業種コード付きチップで表示。`--industries` の値も併記 |
 | チップ | プリセット名／「財務: EDINET DB」 |
 | コピーボタン | クリックで `navigator.clipboard.writeText()` 実行。2秒間「✓ コピー済み」に変化後復帰 |
-| データソース | `data.ts > generatedCommand`（`targetSectors` のコードから `--industries` を自動生成） |
+| データソース | `data.ts > screeningCommandArgs`（`targetSectors` のコードから `--industries` を自動生成）＋ Python の実行コマンド名は `GET /api/env` から取得して先頭に付ける（2026-09-23 変更・BUG-019） |
+| 実行コマンド名 | **`data.ts` に焼き込まない。** `data.ts` は片方の OS で生成したものを両メンバーが共有するため、コマンド名を含めると受け取った側で必ず誤表示になる。`src/pythonCommand.tsx` の `usePythonEnv()` が表示のたびにサーバへ問い合わせ、実際に `spawn` される値（Windows: `python` / macOS: `python3` / `PYTHON` での上書き）を表示する |
+| 問い合わせ失敗時 | `navigator.userAgent` からの推定値を表示し、**「ブラウザの OS から推定しています」と注記を併記**する（`<PythonBinNote>`）。推定値を正しい値のように見せない |
 
 ### 3.7 マクロ→業種の自動絞り込み（2026-06-10 追加）
 
@@ -98,10 +100,10 @@
 | 概要 | 「マクロ分析を更新」ボタン押下時、最新記事から **狙う/避ける業種をClaudeが導出** して `data.ts` に書き戻す |
 | フロー | `fetch_macro.py`（記事取得）→ `claude -p`（JSON出力：weather/economistReports/**targetSectors**/**avoidSectors**）→ `vite-plugin-macro.ts` が `data.ts` を更新 |
 | 業種コード | JPX 33業種コードから厳密選択（プロンプトにコード表を内蔵・4桁数字でバリデーション） |
-| 連動 | `targetSectors` 変更 → `generatedCommand` の `--industries` が自動追従 |
+| 連動 | `targetSectors` 変更 → `screeningCommandArgs` の `--industries` が自動追従 |
 | 可視化 | 「狙うセクター（コード付き）」リスト＋コマンド欄上部の絞り込み業種チップで、現在の対象業種が常に見える |
-| 実行環境（2026-09-01 追加） | Python の実行コマンドは `vite-plugin-macro.ts` の `PYTHON_BIN` で決まる。**既定は `python3`**（macOS / Linux 標準）。Windows など `python` で起動する環境では `PYTHON=python npm run dev` のように環境変数で上書きする |
-| エラー表示 | Python コマンドが見つからない場合（exit=127）は、進捗パネルに「'python3' コマンドが見つかりません。環境変数 PYTHON で実行コマンドを指定してください」と原因と対処を明示する |
+| 実行環境（2026-09-18 改訂・BUG-018） | Python の実行コマンドは `vite-plugin-macro.ts` の `PYTHON_BIN` で決まり、**OS から自動判定する**（Windows: `python` / macOS・Linux: `python3`）。`python3.exe` は Windows に通常存在しないため決め打ちできない。環境変数 `PYTHON` があればそれを最優先する（venv・py ランチャー・conda 用） |
+| エラー表示 | Python コマンドが見つからない場合、進捗パネルに「'<実際のコマンド名>' コマンドが見つかりません。環境変数 PYTHON で指定してください」と原因と対処を明示する。未検出の終了コードは OS で違うため **127（Unix系）/ 9009（cmd.exe）/ ENOENT（spawn 直呼び）を等しく扱う** |
 | プロンプト受け渡し（2026-09-01 追加） | `CLAUDE_PROMPT` は **stdin 経由**で `claude -p` に渡す。argv に載せると `shell: true` によりシェルへ素通しされ、スキーマ内のバッククォート（```json コードフェンス）がコマンド置換として解釈されプロンプトが壊れる（BUG-002） |
 
 ---
@@ -125,3 +127,20 @@
 | 避けるセクター | text-red-500 |
 | コマンド欄テキスト | text-emerald-700 |
 | コピー完了ボタン | bg-emerald-600 / text-white |
+
+
+---
+
+## 鮮度表示（2026-09-13 追加）
+
+「参考記事の最新日」の隣に「この分析の実行日」を出す。両者は別物で、
+記事が新しくても分析そのものが古いことがあるため必ず並べて表示する。
+
+| 表示 | 値 | 色 |
+|---|---|---|
+| 参考記事の最新日 | `macroMeta.latestArticleDate` | 固定（グレー） |
+| この分析の実行日 | `macroMeta.generatedDate`（N日前を併記） | 7日以内=emerald / 14日以内=amber / 超=red / 不明=red |
+
+`generatedDate` は `vite-plugin-macro.ts` が分析実行時に書き込む。
+値が無い場合は記事日付で代用せず「不明」と表示する（BUG-014）。
+ヘッダーの鮮度バナーにも3本目の「マクロ」pill として同じ判定が出る。

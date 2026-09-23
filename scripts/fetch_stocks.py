@@ -20,7 +20,8 @@ warnings.filterwarnings('ignore')
 import requests
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
@@ -39,24 +40,140 @@ PRESETS = {
 # ──────────────────────────────────────────
 # Step1: JPXマスターから対象銘柄を取得
 # ──────────────────────────────────────────
+# JPXの銘柄マスター。2026年に .xls → .xlsx へ変わった実績があるので、
+# 失敗したら旧URLも試す。どちらも駄目なら配布ページのURLを添えて止める。
+JPX_MASTER_URLS = (
+    'https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx',
+    'https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls',
+)
+JPX_MASTER_PAGE = 'https://www.jpx.co.jp/markets/statistics-equities/misc/01.html'
+
+
 def fetch_jpx_master(industry_codes: list[int]) -> pd.DataFrame:
     print(f'[1/4] JPXマスター取得中...')
-    url = 'https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls'
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    df = pd.read_excel(io.BytesIO(r.content))
+    # ステータスと中身を必ず確認する。以前はここを見ておらず、
+    # 404のHTMLをそのまま pd.read_excel に渡して
+    # 「Excel file format cannot be determined」という無関係な例外になっていた。
+    content = None
+    errors = []
+    for url in JPX_MASTER_URLS:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+        except Exception as e:
+            errors.append(f'{url} → 通信失敗 ({e})')
+            continue
+        if r.status_code != 200:
+            errors.append(f'{url} → HTTP {r.status_code}')
+            continue
+        ctype = r.headers.get('Content-Type', '')
+        if 'html' in ctype.lower():
+            errors.append(f'{url} → Excelではなくページが返った ({ctype})')
+            continue
+        content = r.content
+        if url != JPX_MASTER_URLS[0]:
+            print(f'   ※ 予備URLで取得しました: {url}')
+        break
+
+    if content is None:
+        raise SystemExit(
+            'JPXの銘柄マスターを取得できませんでした。配布URLが変更された可能性があります。\n'
+            + '\n'.join(f'  - {e}' for e in errors)
+            + f'\n  最新のリンクはこちらで確認してください: {JPX_MASTER_PAGE}\n'
+              '  （data_j のリンク先URLを scripts/fetch_stocks.py の JPX_MASTER_URLS に反映してください）'
+        )
+
+    df = pd.read_excel(io.BytesIO(content))
+    if len(df.columns) != 10:
+        raise SystemExit(
+            f'JPXマスターの列数が想定と違います（{len(df.columns)}列・想定10列）。'
+            f'配布フォーマットが変わった可能性があります: {list(df.columns)}'
+        )
     df.columns = ['date','code','name','market','sector33_code','sector33','sector17_code','sector17','scale_code','scale']
     # プライム・スタンダードのみ、ETF除外
     df = df[df['market'].isin(['プライム（内国株式）', 'スタンダード（内国株式）'])]
     df = df[df['sector33_code'].apply(lambda x: str(x).isdigit())]
     df['sector33_code'] = df['sector33_code'].astype(int)
     df = df[df['sector33_code'].isin(industry_codes)]
-    df['code'] = df['code'].astype(str).str.zfill(4)
+    df['code'] = df['code'].astype(str).str.strip().str.zfill(4)
+
+    # 普通株以外（優先株・社債型種類株式）を除外する。
+    # JPXの銘柄コードは4文字（数字、または 253A のような英数字）。
+    # 種類株式だけが5文字で、親会社と同じ業種・同じ市場区分に載っているため
+    # 市場区分のフィルタでは落ちない。放置すると
+    #   50765 インフロニア・ホールディングス第１回社債型種類株式
+    #   5076  インフロニア・ホールディングス（普通株）
+    # が両方スクリーニングに入り、同じ会社が上位15社の枠を2つ占めてしまう。
+    is_common = df['code'].str.fullmatch(r'[0-9A-Z]{4}')
+    dropped = df[~is_common]
+    if not dropped.empty:
+        print(f'   種類株式・優先株を除外: {len(dropped)}件 '
+              f'({", ".join(f"{r.code} {r.name[:14]}" for r in dropped.itertuples())})')
+    df = df[is_common]
     print(f'   対象銘柄: {len(df)}社（業種コード: {industry_codes}）')
+    if df.empty:
+        raise SystemExit(
+            f'指定された業種コード {industry_codes} に該当する銘柄がありません。'
+            'コードが33業種コードであることを確認してください。'
+        )
     return df[['code','name','sector33_code','sector33']].reset_index(drop=True)
 
 # ──────────────────────────────────────────
 # Step2: yfinanceで株価・指標取得
 # ──────────────────────────────────────────
+# タイムゾーン解決の警告は1回だけ出す（銘柄ごとに出すとログが埋まる）
+_tz_warned = False
+
+
+def _exchange_tz(name: str):
+    """取引所のタイムゾーンを返す。
+
+    Windows には OS のタイムゾーンDBが無いため、`tzdata` パッケージを
+    入れていないと ZoneInfo が失敗する。ここで黙って None を返すと
+    呼び出し側が date.today() にフォールバックし、BUG-012（前営業日の終値に
+    当日の日付が付く）が警告なしに復活する。
+
+    東証（Asia/Tokyo）は夏時間が無く通年 UTC+9 で固定なので、
+    tzdata が無い場合は固定オフセットで代替する。これは近似ではなく正確な値。
+    それ以外の取引所は代替できないため、理由を明示して None を返す。
+    """
+    global _tz_warned
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        if name == 'Asia/Tokyo':
+            if not _tz_warned:
+                _tz_warned = True
+                print('  ※ tzdata が見つかりません。東証は通年UTC+9で夏時間が無いため、'
+                      '固定オフセット(+09:00)で代替します（値は正確です）。')
+                print('     警告を消すには: pip install tzdata')
+            return timezone(timedelta(hours=9))
+        if not _tz_warned:
+            _tz_warned = True
+            print(f'  ⚠ タイムゾーン {name} を解決できません。株価の基準日を判定できないため、'
+                  '鮮度が実際より新しく表示される可能性があります。')
+            print('     解消するには: pip install tzdata')
+        return None
+
+
+def quote_date(info: dict) -> str | None:
+    """yfinanceの値が「いつ時点のものか」を取引所ローカル日付で返す。
+
+    実行した日ではなく約定した日を使う。夜間や休日に実行すると
+    date.today() は前営業日の終値に当日の日付を貼ってしまい、
+    鮮度バナーが1日ぶん新しく見える（＝古い値を黙って残すのと同じこと）。
+    """
+    ts = info.get('regularMarketTime')
+    if not ts:
+        return None
+    tz = _exchange_tz(info.get('exchangeTimezoneName') or 'Asia/Tokyo')
+    if tz is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ts), tz).date().isoformat()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def fetch_yfinance(code: str) -> dict | None:
     try:
         tick = yf.Ticker(f'{code}.T')
@@ -75,6 +192,7 @@ def fetch_yfinance(code: str) -> dict | None:
             'market_cap':   round((info.get('marketCap', 0) or 0) / 1e8),
             'high_52w':     info.get('fiftyTwoWeekHigh', price),
             'low_52w':      info.get('fiftyTwoWeekLow', price),
+            'price_date':   quote_date(info),
         }
     except Exception:
         return None
@@ -180,7 +298,10 @@ def main():
     print(f'\n[3/4] EDINET DB で財務深掘り中（公式XBRL・毎日8時更新）...')
     from edinet_fetcher import (EDINETClient, extract_metrics, extract_detail,
                                 detect_trap_v2, calc_freshness_edinet,
-                                calc_score_breakdown)
+                                calc_score_breakdown, RULE_LABELS)
+    # 財務を取得できなかった銘柄は全ルールが判定不能。
+    # trapFlag='normal' のまま何も添えないと「罠なしを確認済み」に見えてしまう。
+    UNDETERMINED_ALL = [f'{lbl}: 財務データを取得できていない' for lbl in RULE_LABELS]
     edinet = EDINETClient()
     code_map = edinet.build_code_map()
     edinet_count = unavailable_count = 0
@@ -192,6 +313,7 @@ def main():
             # スコア閾値未満は深掘り対象外。財務未取得を明示
             results.append({**s, 'deepScore': s['score'],
                             'trapFlag': 'normal', 'trapReasons': [],
+                            'trapUndetermined': UNDETERMINED_ALL,
                             'freshness': 'critical', 'irbankDate': None,
                             'equityRatio': 50, 'consecutiveDividendYears': 0,
                             'dataSource': 'unavailable'})
@@ -215,7 +337,7 @@ def main():
             detail = extract_detail(company)
             # 6項目評価。算出根拠が無い項目は None のまま画面に「未算出」と出す
             breakdown = calc_score_breakdown(metrics, s)
-            trap_flag, trap_reasons, penalty = detect_trap_v2(metrics)
+            trap_flag, trap_reasons, trap_undet, penalty = detect_trap_v2(metrics)
             deep_score  = min(100, max(0, s['score'] + penalty))
             freshness   = calc_freshness_edinet(metrics.get('disclosure_date'))
             eq_ratio    = metrics.get('equity_ratio', 50) or 50
@@ -230,6 +352,8 @@ def main():
                 'deepScore': deep_score,
                 'trapFlag': trap_flag,
                 'trapReasons': trap_reasons,
+                # 判定できなかったルール。「該当なし」と混ぜないため別に持つ
+                'trapUndetermined': trap_undet,
                 'freshness': freshness,
                 'irbankDate': disc_date,
                 'equityRatio': eq_ratio,
@@ -248,6 +372,8 @@ def main():
             'deepScore': s['score'],          # 罠検出できないのでペナルティ0（素点のまま）
             'trapFlag': 'normal',
             'trapReasons': ['財務データ未取得（EDINET DB未収録/失敗）'],
+            # 財務が無い＝全ルール判定不能。「罠なし」と見えないようにする
+            'trapUndetermined': UNDETERMINED_ALL,
             'freshness': 'critical',          # 鮮度保証できない＝critical扱い
             'irbankDate': None,
             'equityRatio': 50,
@@ -268,6 +394,8 @@ def main():
     final = results[:args.top]
     print(f'\n[4/4] 完了: 上位{len(final)}社を出力')
 
+    price_dates = [r['price_date'] for r in final if r.get('price_date')]
+
     # 実行メタを出力。ダッシュボードのサマリーカード（母集団・1段階目・2段階目）は
     # これを参照する。持たせないと画面が固定値を表示し、実行結果と食い違う。
     meta_path = 'scripts/screening_meta.json'
@@ -282,6 +410,10 @@ def main():
             'outputCount': len(final),            # 最終出力
             'edinetCount': edinet_count,          # 財務取得できた社数
             'unavailableCount': unavailable_count,  # 財務を取得できなかった社数
+            # 株価の基準日。実行日ではなく実際に値が付いた日を使う
+            # （夜間実行時に前営業日の終値へ当日の日付を貼らないため）
+            'priceDate': min(price_dates) if price_dates else date.today().isoformat(),
+            'priceFailedCount': 0,
         }, f, ensure_ascii=False, indent=2)
     print(f'実行メタを {meta_path} に保存しました'
           f'（母集団{universe_count} → 1段階目{len(candidates)} → 深掘り{len(results)} → 出力{len(final)}）')
