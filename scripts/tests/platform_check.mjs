@@ -160,7 +160,29 @@ try {
     scrErr ? scrErr.message : JSON.stringify(scr.events.slice(-2)));
   if (!scrOk) dumpEvents('run-screening', scr.events);
 
-  // ── ④ バックアップのフォルダ名が OS で作れるか ──────────────
+  stopDev(dev); dev = null;
+  await new Promise((r) => setTimeout(r, 2000));
+
+  // ── ④ 逆方向: Python が実在するときに案内文を出さないか ────────
+  //   「Python が無い」と誤って案内すると、本当の失敗原因から目を逸らさせる。
+  //   screening_result.json が無い状態の refresh_prices.py は
+  //   ネットワークに出る前に exit=1 で終わるため、失敗の実例として使える。
+  //   （このファイルがある環境では yfinance を呼んでしまうのでスキップする）
+  if (existsSync(path.resolve('scripts/screening_result.json'))) {
+    console.log('- 誤検知チェックはスキップ（scripts/screening_result.json があるため）');
+  } else {
+    dev = await startDev(5213);
+    const real = await readSse('http://127.0.0.1:5213/api/refresh-prices');
+    const realErr = real.events.find((e) => e.type === 'error');
+    const noFalseHint = !!realErr && !/コマンドが見つかりません/.test(realErr.message ?? '');
+    check('Python が実在するときは「見つかりません」と言わない', noFalseHint,
+      realErr ? realErr.message : JSON.stringify(real.events.slice(-2)));
+    if (!noFalseHint) dumpEvents('refresh-prices(正常な python)', real.events);
+    stopDev(dev); dev = null;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  // ── ⑤ バックアップのフォルダ名が OS で作れるか ──────────────
   //   ISO日時をそのまま使うとコロンが入り、Windows では作成に失敗する。
   const created = backupDirs().filter((n) => !before.includes(n));
   check('実行前バックアップのフォルダが作られた', created.length > 0, created.join(', ') || '(なし)');

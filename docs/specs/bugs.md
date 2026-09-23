@@ -1024,3 +1024,74 @@ BUG-019 で新規追加した `scripts/tests/tz_check.py` だけ付け忘れて�
 `print()` の代わりに `sys.stdout.buffer.write()` や `io.TextIOWrapper` を被せる方法もあるが、
 `TextIOWrapper` は別スクリプトから import されたときに前のラッパーが破棄され
 元の buffer ごと閉じられる問題があるため、既存コードと同じ `reconfigure` に揃えた。
+
+---
+
+## BUG-021: Windows のコマンド未検出は終了コード 9009 ではなく 1 だった
+
+| 項目 | 内容 |
+|---|---|
+| Bug ID | BUG-021 |
+| 起票日 | 2026-09-23 |
+| Severity | medium |
+| Status | resolved |
+| 対象ファイル | `vite-plugin-macro.ts`, `CLAUDE.md`, `scripts/tests/platform_check.mjs` |
+| 発見経路 | **GitHub Actions の `windows-latest`**（BUG-019 で追加した platform-check） |
+
+### 再現手順
+1. Windows で `PYTHON=存在しないコマンド名 npm run dev` を実行する
+2. 「株価を更新」または「銘柄を選び直す」ボタンを押す
+
+### 期待する動作
+「'<コマンド名>' コマンドが見つかりません。環境変数 PYTHON で指定してください」と案内が出る。
+
+### 実際の動作
+```
+refresh_prices.py が失敗 (exit=1)
+```
+案内が出ない。**BUG-018 で直したはずの「原因不明の失敗」が Windows では残っていた。**
+
+進捗ログには cmd.exe の出力が届いている。
+```
+[py-err] 'python_does_not_exist_9009' is not recognized as an internal or external command,
+[py-err] operable program or batch file.
+```
+つまり cmd.exe は正しく検出しているのに、**Node が受け取る終了コードが 1** だった。
+
+### 原因
+BUG-018 で「Windows の cmd.exe はコマンド未検出時に 9009 を返す」という前提で
+`isCommandNotFound(code) { return code === 127 || code === 9009; }` を書いた。
+この前提が実機で成り立たなかった。
+
+macOS では 127（`shell: true` 経路）と ENOENT（`shell: false` 経路）の両方が
+期待どおり出ていたため、**macOS だけ見ていては絶対に気づけない**種類の誤りだった。
+
+なお `stderr` の文言で判定する案もあるが、
+**OS の言語設定で文言が変わる**（日本語版 Windows は日本語で出る）ため採用しなかった。
+
+### 対応（2026-09-23）
+終了コードや文言から**推測するのをやめ、実地に確かめる**方式に変えた。
+
+- `commandExists(cmd)` を追加。`where`（Windows）/ `which`（Unix系）を
+  `shell: false` で起動し、**その終了コード**で判定する。言語設定に依存しない。
+  `.bat` / `.cmd` のラッパーも `where` は見つけられる（conda 環境で誤検知しない）。
+  区切り文字を含む値（フルパス指定）は `existsSync` で判定する。
+- `pythonNotFoundSuffix(code)` に集約し、3箇所の `close` ハンドラで共通に使う。
+  終了コード判定は「速い経路」として残し、最終判断は実地確認に委ねる。
+- **`CLAUDE.md` のルール2を書き換えた。** 「終了コードは OS ごとに違う」から
+  「**終了コードで原因を判定しない**」に改め、実測で裏切られた事実を明記した。
+- **誤検知チェックを追加**（`platform_check.mjs`）。
+  Python が実在する状態でスクリプトが失敗したとき、
+  「見つかりません」と**言わない**ことを確認する。
+  誤って常に案内を出す実装にしてもテストが通ってしまうのを防ぐため。
+
+### 検証
+- macOS ローカル: 127 経路・ENOENT 経路の両方で案内が出ることを再確認。
+- 誤検知チェック: `screening_result.json` が無い状態の `refresh_prices.py` は
+  ネットワークに出る前に exit=1 で終わるため、これを「Python は在るが失敗した」実例として使う。
+- Windows 実機（GitHub Actions）での確認結果は `docs/specs/ci_platform_check.md` の実行履歴を参照。
+
+### 教訓
+この不具合は、**「動くはず」で済ませていた箇所が実際には動いていなかった**という
+BUG-018 と全く同じ構図で、しかも BUG-018 の修正自体に含まれていた。
+プラットフォーム差は仕様の記述ではなく**実機の挙動で確認する**しかない。

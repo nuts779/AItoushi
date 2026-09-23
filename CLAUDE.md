@@ -42,8 +42,14 @@
    - ✗ `spawn('python', ...)` / `spawn('python3', ...)`
    - ✓ `process.platform === 'win32' ? 'python' : 'python3'` で判定し、環境変数でも上書き可能にする
    - Windows に `python3.exe` は通常存在しない（Microsoft Store のエイリアスが反応して紛らわしい挙動になる）
-2. **終了コードは OS ごとに違う**
+2. **終了コードで原因を判定しない（実測で裏切られた）**
    - コマンド未検出: Unix系 = `127` / Windows cmd.exe = `9009` / spawn直呼び = `ENOENT`
+     …と言われているが、**Windows で `1` が返ることを実測した**（BUG-021）。
+     cmd.exe は "is not recognized as an internal or external command" と出しているのに、
+     Node が受け取る終了コードは `1` だった。
+   - **stderr の文言でも判定しない。** OS の言語設定で変わる（日本語版 Windows は日本語）。
+   - 原因を知りたければ**実地に確かめる**。コマンドの有無は
+     `where`（Windows）/ `which`（Unix系）の終了コードで判定する（言語設定に依存しない）。
    - 片方だけ見ていると、もう片方で「原因不明の失敗」になる
 3. **パスは必ず `pathlib.Path` / Node の `path` で組み立てる**。区切り文字を直接書かない
 4. **ファイル名にコロンを使わない**（Windows では作成できない）。ISO日時をそのまま使わない
@@ -68,6 +74,9 @@
 - [ ] パス・ファイル名に OS 依存がないか
 - [ ] Python の依存に OS 固有のものがあれば `requirements.txt` に条件付きで書いたか
 - [ ] 片方でしか確認できない場合、**その旨を報告に明記したか**（「動くはず」で済ませない）
+- [ ] **GitHub Actions の platform-check を通したか**（`windows-check` ブランチへ push、
+      または Actions タブから手動実行）。公開リポジトリなので実行は無料。
+      詳細は `docs/specs/ci_platform_check.md`。これが両OSでの唯一の実機確認手段
 
 ## Policy
 - **Speed first**: Build working software as fast as possible

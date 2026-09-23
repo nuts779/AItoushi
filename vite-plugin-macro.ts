@@ -1,5 +1,5 @@
 import type { Plugin } from 'vite';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync } from 'node:fs';
 
@@ -36,10 +36,44 @@ const IS_WINDOWS = process.platform === 'win32';
 const PYTHON_BIN = process.env.PYTHON ?? (IS_WINDOWS ? 'python' : 'python3');
 
 /** コマンドが見つからなかったときの終了コードは OS で違う。
- *  Unix系シェル = 127 / Windows の cmd.exe = 9009。
- *  片方だけ見ていると、もう片方で「原因不明の失敗」になる。 */
+ *  Unix系シェル = 127 / Windows の cmd.exe = 9009 とされるが、
+ *  **Windows では 1 になる場合がある**（GitHub Actions の windows-latest で実測。
+ *  cmd.exe は "is not recognized as an internal or external command" と出しているのに
+ *  Node が受け取る終了コードは 1 だった）。BUG-021 参照。
+ *  したがって終了コードだけで判定してはいけない。ここは「速い経路」として残し、
+ *  最終判断は commandExists() の実地確認に任せる。 */
 function isCommandNotFound(code: number | null): boolean {
   return code === 127 || code === 9009;
+}
+
+/** そのコマンドが本当に存在するかを実地に確かめる。
+ *
+ *  終了コードや stderr の文言に頼らない理由:
+ *    ・終了コードは OS と構成で変わる（上記のとおり Windows で 1 になることがある）
+ *    ・stderr の文言は OS の言語設定で変わる（日本語版 Windows は日本語で出る）
+ *  `where`（Windows）/ `which`（Unix系）の終了コードは言語設定に左右されないため、
+ *  これを唯一の判断材料にする。`.bat` / `.cmd` のラッパーも `where` は見つけられる。
+ *
+ *  PYTHON_BIN は開発者自身が環境変数で与える値であり外部入力ではないが、
+ *  念のためシェルを経由せず（shell: false）引数配列で渡す。 */
+function commandExists(cmd: string): boolean {
+  // パス指定（区切り文字を含む）ならファイルの有無で判断する。
+  // where / which は PATH を探すだけなので、フルパス指定には答えられない。
+  if (cmd.includes('/') || cmd.includes('\\')) return existsSync(cmd);
+  const r = spawnSync(IS_WINDOWS ? 'where' : 'which', [cmd], {
+    stdio: 'ignore',
+    shell: false,
+  });
+  // where / which 自体が起動できなかった場合は判定不能。
+  // 「存在する」と答えて案内文を消すより、出しておく方が害が小さい。
+  if (r.error) return false;
+  return r.status === 0;
+}
+
+/** 異常終了したときに付ける案内文。Python が実在すれば空文字を返す。 */
+function pythonNotFoundSuffix(code: number | null): string {
+  if (isCommandNotFound(code)) return pythonNotFoundHint();
+  return commandExists(PYTHON_BIN) ? '' : pythonNotFoundHint();
 }
 
 /** Python が見つからないときの案内文（両OSで意味が通るようにする） */
@@ -443,7 +477,7 @@ export function macroPlugin(): Plugin {
         py.on('close', (code) => {
           if (code !== 0) {
             // Python のコマンド名が環境と合っていない場合の案内（終了コードは OS で違う）
-            const hint = isCommandNotFound(code) ? pythonNotFoundHint() : '';
+            const hint = pythonNotFoundSuffix(code);
             finish('error', `fetch_macro.py が失敗 (exit=${code})${hint}`);
             return;
           }
@@ -574,7 +608,7 @@ export function macroPlugin(): Plugin {
         });
         py.on('close', (code) => {
           if (code !== 0) {
-            const hint = isCommandNotFound(code) ? pythonNotFoundHint() : '';
+            const hint = pythonNotFoundSuffix(code);
             finish('error', `refresh_prices.py が失敗 (exit=${code})${hint}`);
             return;
           }
@@ -748,7 +782,7 @@ export function macroPlugin(): Plugin {
             return;
           }
           if (code !== 0) {
-            const hint = isCommandNotFound(code) ? pythonNotFoundHint() : '';
+            const hint = pythonNotFoundSuffix(code);
             finish('error', `fetch_stocks.py が失敗 (exit=${code})${hint}。`
               + `data.ts は変更されていません（バックアップ: ${backupDir}）`);
             return;
