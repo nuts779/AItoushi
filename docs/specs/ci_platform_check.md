@@ -120,3 +120,27 @@ python scripts/tests/tz_check.py
 node scripts/tests/platform_check.mjs
 ```
 自分の OS の分しか確認できないが、push する前の素振りとして使える。
+
+## 8. 実行履歴（初回導入時）
+
+初回の4回で、**macOS だけでは絶対に見つからない不具合を2件**検出した。
+
+| 回 | windows-latest | macos-latest | 検出内容 |
+|---|---|---|---|
+| 1 | ✗ タイムゾーン | ✓ 全通過 | **BUG-020**: Windows の Python は標準出力が cp1252 で、日本語を print した時点で `UnicodeEncodeError` |
+| 2 | ✗ OS依存チェック | ✓ 全通過 | **BUG-021** の兆候。コマンド未検出時に案内文が出ない（exit=1） |
+| 3 | ✗ OS依存チェック | ✓ 全通過 | 診断ログを追加。cmd.exe は "is not recognized…" と出しているのに **Node が受け取る終了コードは 1** と判明 |
+| 4 | **✓ 全通過（15項目）** | **✓ 全通過（14項目）** | BUG-021 修正後 |
+
+実測値の記録（4回目・windows-latest）:
+
+```
+=== 実行環境: win32 / node 22.23.2 ===
+✓ /api/env が この OS の Python コマンド名を返す  … 期待=python 実際=python
+✓ 株価更新: Python 未検出が案内文付きで報告される  … exit=1 ＋ 案内文
+✓ Python が実在するときは「見つかりません」と言わない  … exit=1（案内文なし）
+✓ バックアップのフォルダ名にコロンが含まれない  … 2026-09-23T05-46-42
+=== すべて通過 ===
+```
+
+所要時間は windows-latest が約1分40秒、macos-latest が約30秒。
