@@ -86,6 +86,14 @@ async function readSse(url, timeoutMs = 60000) {
   return { status: res.status, events };
 }
 
+/** 失敗したときだけ、サーバから届いたログを全部出す。
+ *  終了コードや stderr の文言は OS で違うため、実機のログが無いと原因を特定できない。 */
+function dumpEvents(label, events) {
+  console.log(`   --- ${label} が返したイベント全件 ---`);
+  for (const e of events) console.log(`   [${e.type}] ${e.message ?? ''}`);
+  console.log('   --- ここまで ---');
+}
+
 function backupDirs() {
   const dir = path.resolve('scripts/backup');
   if (!existsSync(dir)) return [];
@@ -138,17 +146,19 @@ try {
   // 株価更新（shell: true 経路 → Windows では cmd.exe の 9009）
   const price = await readSse('http://127.0.0.1:5212/api/refresh-prices');
   const priceErr = price.events.find((e) => e.type === 'error');
-  check('株価更新: Python 未検出が案内文付きで報告される',
-    !!priceErr && /コマンドが見つかりません/.test(priceErr.message ?? ''),
+  const priceOk = !!priceErr && /コマンドが見つかりません/.test(priceErr.message ?? '');
+  check('株価更新: Python 未検出が案内文付きで報告される', priceOk,
     priceErr ? priceErr.message : JSON.stringify(price.events.slice(-2)));
+  if (!priceOk) dumpEvents('refresh-prices', price.events);
 
   // スクリーニング（Windows は shell: true / それ以外は shell: false → ENOENT 経路）
   const scr = await readSse(
     'http://127.0.0.1:5212/api/run-screening?industries=3650&preset=stable_defensive&top=15&force=1');
   const scrErr = scr.events.find((e) => e.type === 'error');
-  check('スクリーニング: Python 未検出が案内文付きで報告される',
-    !!scrErr && /コマンドが見つかりません/.test(scrErr.message ?? ''),
+  const scrOk = !!scrErr && /コマンドが見つかりません/.test(scrErr.message ?? '');
+  check('スクリーニング: Python 未検出が案内文付きで報告される', scrOk,
     scrErr ? scrErr.message : JSON.stringify(scr.events.slice(-2)));
+  if (!scrOk) dumpEvents('run-screening', scr.events);
 
   // ── ④ バックアップのフォルダ名が OS で作れるか ──────────────
   //   ISO日時をそのまま使うとコロンが入り、Windows では作成に失敗する。
