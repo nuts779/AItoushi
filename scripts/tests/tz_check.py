@@ -13,6 +13,13 @@
 """
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+# Windows の Python は標準出力が cp1252 のため、日本語を print するだけで
+# UnicodeEncodeError で落ちる（GitHub Actions の windows-latest で実際に発生）。
+# 既存のスクリプトと同じく reconfigure で UTF-8 にしておく。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 sys.path.insert(0, 'scripts')
 
@@ -85,6 +92,18 @@ info_ny = {'regularMarketTime': epoch(2026, 9, 18, 15, 0), 'exchangeTimezoneName
 ny = fs.quote_date(info_ny)
 fs.ZoneInfo = orig
 check('夏時間のある取引所は代替せず None を返す', ny is None, str(ny))
+
+# ── ⑥ 全スクリプトが標準出力を UTF-8 にしているか ─────────
+#   Windows の既定は cp1252 で、日本語を print した瞬間に UnicodeEncodeError で落ちる。
+#   このプロジェクトのログは全て日本語なので、1行でも print すれば影響する。
+#   実際に windows-latest でこのスクリプト自身が落ちたため、抜けを機械的に検出する。
+missing = [
+    str(f) for f in sorted(Path('scripts').rglob('*.py'))
+    if 'reconfigure(encoding' not in f.read_text(encoding='utf-8')
+    and '__pycache__' not in str(f)
+]
+check('全 Python スクリプトが標準出力を UTF-8 に設定している',
+      not missing, '未対応: ' + ', '.join(missing) if missing else '')
 
 print(f"\n=== {'すべて通過' if failures == 0 else f'{failures} 件失敗'} ===")
 sys.exit(0 if failures == 0 else 1)

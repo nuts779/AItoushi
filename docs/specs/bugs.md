@@ -963,3 +963,64 @@ export const generatedCommand =
 BUG-018 と同様、**Windows 実機での確認はできていない**。
 ただし本件は「サーバが `process.platform` を見て答える」という単一の分岐に集約されており、
 その分岐を強制した状態での表示は上記のとおり確認済み。
+
+---
+
+## BUG-020: Windows の Python は日本語を print しただけで落ちる
+
+| 項目 | 内容 |
+|---|---|
+| Bug ID | BUG-020 |
+| 起票日 | 2026-09-23 |
+| Severity | medium |
+| Status | resolved |
+| 対象ファイル | `scripts/tests/tz_check.py` |
+| 発見経路 | **GitHub Actions の `windows-latest` で実際に落ちた**（BUG-019 で追加した platform-check の初回実行） |
+
+### 再現手順
+1. Windows で日本語を `print()` する Python スクリプトを実行する
+   （`PYTHONIOENCODING=cp1252` で他OSでも再現できる）
+
+### 期待する動作
+ログが表示される。
+
+### 実際の動作
+1行目で異常終了する。
+
+```
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 6-9:
+character maps to <undefined>
+  File "...\encodings\cp1252.py", line 19, in encode
+```
+
+### 原因
+Windows の Python は標準出力の既定エンコーディングが **cp1252** で、
+日本語を含む文字列を書き出せない。
+このプロジェクトのログはすべて日本語なので、**1行 print した時点で落ちる**。
+
+`scripts/` 配下の既存スクリプト6本はすべて
+`sys.stdout.reconfigure(encoding='utf-8')` を持っていたが、
+BUG-019 で新規追加した `scripts/tests/tz_check.py` だけ付け忘れていた。
+
+**アプリ本体には影響しない**（既存スクリプトは対策済み）。
+ただし「既存コードに入っていた対策が実際に必須だった」ことが
+**実機で初めて裏付けられた**という意味がある。
+これまで macOS でしか動かしていなかったため、この対策は
+効果を確認できないまま入っていた。
+
+### 対応（2026-09-23）
+- `tz_check.py` に他スクリプトと同じ `reconfigure` を追加。
+- **抜けを機械的に検出するチェックを追加**（`tz_check.py` の項目⑥）。
+  `scripts/**/*.py` を走査し、`reconfigure(encoding` を持たないファイルがあれば失敗する。
+  今後スクリプトを新規追加したときに同じ忘れ方をしても CI が止める。
+
+### 検証
+- `PYTHONIOENCODING=cp1252 python3 scripts/tests/tz_check.py` → 全項目通過。
+- 対策行を外した複製を cp1252 で実行 → **終了コード1・`UnicodeEncodeError`** を再現。
+  「対策があるから通っている」ことを両方向から確認した。
+- 新しいチェック⑥が、対策の無いファイルを実際に検出することを確認。
+
+### 備考
+`print()` の代わりに `sys.stdout.buffer.write()` や `io.TextIOWrapper` を被せる方法もあるが、
+`TextIOWrapper` は別スクリプトから import されたときに前のラッパーが破棄され
+元の buffer ごと閉じられる問題があるため、既存コードと同じ `reconfigure` に揃えた。

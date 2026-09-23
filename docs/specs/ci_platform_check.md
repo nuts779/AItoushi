@@ -62,8 +62,12 @@ Windows には OS のタイムゾーンDBが無く `ZoneInfo('Asia/Tokyo')` が�
 | 5 | `ZoneInfo` を強制的に失敗させても**同じ日付**になる（固定オフセットでの代替） |
 | 6 | 代替時に `None` を返さない（`date.today()` へ黙って落ちない） |
 | 7 | 夏時間のある取引所（America/New_York）は代替せず `None` を返す |
+| 8 | `scripts/**/*.py` の全てが標準出力を UTF-8 に設定している（BUG-020）。Windows の既定は cp1252 で、日本語を1行 print した時点で落ちるため |
 
 固定タイムスタンプで判定するため、実行日やネットワークに左右されない。
+
+項目8は BUG-020 を受けて追加した。初回の CI 実行でこのスクリプト自身が
+`UnicodeEncodeError` で落ちたため、同じ忘れ方を今後 CI が止める。
 
 ### `scripts/tests/platform_check.mjs`
 
