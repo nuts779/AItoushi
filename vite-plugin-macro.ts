@@ -1,13 +1,23 @@
 import type { Plugin } from 'vite';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync } from 'node:fs';
 
 /**
- * Vite dev plugin: /api/fetch-macro エンドポイント
+ * Vite dev plugin: 2つの開発用エンドポイントを提供する
+ *
+ *   POST /api/fetch-macro    … マクロ分析を更新（Claude を呼ぶ・API利用料が発生）
+ *   POST /api/refresh-prices … 株価だけ更新（Python のみ・課金なし・約12秒）
+ *   POST /api/run-screening  … フルスクリーニング（約13分・EDINET最大80回・銘柄が入れ替わる）
+ *   GET  /api/screening-status … 上記の有効/無効と前回実行日を返す（副作用なし）
+ *                              .env.local に DISABLE_SCREENING_RUN=1 で両方を無効化できる
+ *   GET  /api/env            … このサーバが実際に使う Python コマンド名を返す（副作用なし）
+ *                              画面に出すコマンド文字列を OS に合わせるためだけに使う
+ *
+ * /api/fetch-macro の処理フロー:
  *
  * 処理フロー:
- *   ① python scripts/fetch_macro.py を実行
+ *   ① ${PYTHON_BIN} scripts/fetch_macro.py を実行（既定 python3 / 環境変数 PYTHON で変更可）
  *      → scripts/macro_raw.txt を生成
  *   ② claude -p "<プロンプト>" で macro_raw.txt を分析し、**JSON** を stdout に出力
  *   ③ Node.js 側で JSON をパース → src/data.ts を機械的に書き換え
@@ -15,6 +25,63 @@ import { readFileSync, writeFileSync } from 'node:fs';
  *
  * 通信方式: Server-Sent Events (SSE)
  */
+
+// Python 実行コマンド。OSごとに実在するコマンド名が違うため自動判定する。
+//   Windows : `python`（python.org のインストーラは python.exe と py.exe だけを作る。
+//             `python3.exe` は通常存在せず、Microsoft Store のアプリ実行エイリアスが
+//             反応してストアが開くという紛らわしい挙動になる）
+//   macOS/Linux : `python3`（macOS 12.3 以降は `python` が存在しない）
+// 環境変数 PYTHON があればそれを最優先する（venv や py ランチャー用）。
+const IS_WINDOWS = process.platform === 'win32';
+const PYTHON_BIN = process.env.PYTHON ?? (IS_WINDOWS ? 'python' : 'python3');
+
+/** コマンドが見つからなかったときの終了コードは OS で違う。
+ *  Unix系シェル = 127 / Windows の cmd.exe = 9009 とされるが、
+ *  **Windows では 1 になる場合がある**（GitHub Actions の windows-latest で実測。
+ *  cmd.exe は "is not recognized as an internal or external command" と出しているのに
+ *  Node が受け取る終了コードは 1 だった）。BUG-021 参照。
+ *  したがって終了コードだけで判定してはいけない。ここは「速い経路」として残し、
+ *  最終判断は commandExists() の実地確認に任せる。 */
+function isCommandNotFound(code: number | null): boolean {
+  return code === 127 || code === 9009;
+}
+
+/** そのコマンドが本当に存在するかを実地に確かめる。
+ *
+ *  終了コードや stderr の文言に頼らない理由:
+ *    ・終了コードは OS と構成で変わる（上記のとおり Windows で 1 になることがある）
+ *    ・stderr の文言は OS の言語設定で変わる（日本語版 Windows は日本語で出る）
+ *  `where`（Windows）/ `which`（Unix系）の終了コードは言語設定に左右されないため、
+ *  これを唯一の判断材料にする。`.bat` / `.cmd` のラッパーも `where` は見つけられる。
+ *
+ *  PYTHON_BIN は開発者自身が環境変数で与える値であり外部入力ではないが、
+ *  念のためシェルを経由せず（shell: false）引数配列で渡す。 */
+function commandExists(cmd: string): boolean {
+  // パス指定（区切り文字を含む）ならファイルの有無で判断する。
+  // where / which は PATH を探すだけなので、フルパス指定には答えられない。
+  if (cmd.includes('/') || cmd.includes('\\')) return existsSync(cmd);
+  const r = spawnSync(IS_WINDOWS ? 'where' : 'which', [cmd], {
+    stdio: 'ignore',
+    shell: false,
+  });
+  // where / which 自体が起動できなかった場合は判定不能。
+  // 「存在する」と答えて案内文を消すより、出しておく方が害が小さい。
+  if (r.error) return false;
+  return r.status === 0;
+}
+
+/** 異常終了したときに付ける案内文。Python が実在すれば空文字を返す。 */
+function pythonNotFoundSuffix(code: number | null): string {
+  if (isCommandNotFound(code)) return pythonNotFoundHint();
+  return commandExists(PYTHON_BIN) ? '' : pythonNotFoundHint();
+}
+
+/** Python が見つからないときの案内文（両OSで意味が通るようにする） */
+function pythonNotFoundHint(): string {
+  return `：'${PYTHON_BIN}' コマンドが見つかりません。`
+    + `環境変数 PYTHON で指定してください`
+    + `（${IS_WINDOWS ? '例: set PYTHON=py && npm run dev' : '例: PYTHON=python3.12 npm run dev'}）`;
+}
 
 // Claude に JSON のみを出力させるプロンプト
 const CLAUDE_PROMPT = `あなたはデータ変換スクリプトです。対話は禁止。以下を厳守してください。
@@ -227,9 +294,13 @@ function patchDataTs(dataTsPath: string, analysis: MacroAnalysis): void {
   );
 
   // 3. macroMeta を置換（複数行の object literal）
+  //   generatedDate は「この分析をいつ走らせたか」。記事日付（latestArticleDate）とは別物で、
+  //   記事が新しくても分析自体が1か月前ということがあるため両方持つ。
+  //   Claude の出力ではなくここで採る（分析の実行時刻を知っているのはこちら側だけ）。
+  const generatedDate = new Date().toLocaleDateString('sv-SE');   // ローカル日付の YYYY-MM-DD
   src = src.replace(
     /export const macroMeta = \{[\s\S]*?\};/,
-    `export const macroMeta = {\n  latestArticleDate: '${esc(analysis.latestArticleDate)}',\n};`
+    `export const macroMeta = {\n  latestArticleDate: '${esc(analysis.latestArticleDate)}',\n  generatedDate: '${generatedDate}',\n};`
   );
 
   // 4. economistReports[] を置換
@@ -263,6 +334,57 @@ function patchDataTs(dataTsPath: string, analysis: MacroAnalysis): void {
   writeFileSync(dataTsPath, src, 'utf8');
 }
 
+// ═══════════════════════════════════════════════════════════════
+// BEGIN: フルスクリーニング実行の補助（削除時はこのブロックも消す）
+// ═══════════════════════════════════════════════════════════════
+
+// 実行中フラグ。二重起動を防ぐ。
+// 複数タブから同時に押されても1本しか走らせない（EDINET枠の無駄撃ちを防ぐ）。
+let screeningInFlight = false;
+
+/** .env.local に DISABLE_SCREENING_RUN=1 があれば実行を止める。
+ *  コードを触らずボタンを引っ込めるための緊急スイッチ。
+ *  毎回読み直すので、書き足した時点で即反映される（dev server の再起動不要）。 */
+function isScreeningRunDisabled(): boolean {
+  if (process.env.DISABLE_SCREENING_RUN === '1') return true;
+  try {
+    const env = readFileSync(path.resolve(process.cwd(), '.env.local'), 'utf8');
+    return /^\s*DISABLE_SCREENING_RUN\s*=\s*1\s*$/m.test(env);
+  } catch {
+    return false;   // .env.local が無い場合は有効のまま
+  }
+}
+
+/** 前回スクリーニングを実行した日（YYYY-MM-DD）。読めなければ null。 */
+function readLastScreeningDate(): string | null {
+  try {
+    const meta = JSON.parse(
+      readFileSync(path.resolve(process.cwd(), 'scripts/screening_meta.json'), 'utf8'),
+    );
+    return typeof meta.runDate === 'string' ? meta.runDate : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 上書き前に現状を退避する。戻せない更新をしないため、失敗したら実行自体を中止する。 */
+function backupBeforeScreening(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const dir = path.resolve(process.cwd(), 'scripts/backup', stamp);
+  mkdirSync(dir, { recursive: true });
+  for (const rel of ['src/data.ts', 'scripts/screening_result.json', 'scripts/screening_meta.json']) {
+    const from = path.resolve(process.cwd(), rel);
+    if (existsSync(from)) {
+      copyFileSync(from, path.join(dir, path.basename(rel)));
+    }
+  }
+  return path.relative(process.cwd(), dir);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// END: フルスクリーニング実行の補助
+// ═══════════════════════════════════════════════════════════════
+
 // -------------------------------------------------------------
 // Vite プラグイン本体
 // -------------------------------------------------------------
@@ -271,6 +393,31 @@ export function macroPlugin(): Plugin {
   return {
     name: 'macro-fetch-plugin',
     configureServer(server) {
+      // ═══════════════════════════════════════════════════════════════
+      // GET /api/env … 実行環境の申告（副作用なし・課金なし）
+      //
+      // なぜ必要か:
+      //   画面には「このコマンドを実行してください」という案内を出しているが、
+      //   Python の実行コマンド名は OS で違う（Windows: python / macOS: python3）。
+      //   data.ts は Mac で生成したものを Windows のメンバーも使うため、
+      //   コマンド名を data.ts に焼き込むと受け取った側で必ず嘘になる。
+      //   鮮度タグを凍結してはいけないのと同じ理由で、表示のたびにサーバへ問い合わせる。
+      //
+      // ブラウザ自身は自分が載っている PC の OS を知っていても、
+      // Python がどの名前で入っているか（PYTHON=py などの上書きを含む）は知らない。
+      // 実際に spawn する側が答えるのが唯一の正解。
+      //
+      // 返すのはコマンド名だけ。環境変数そのものは返さない（.env.local に APIキーがある）。
+      server.middlewares.use('/api/env', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({
+          pythonBin: PYTHON_BIN,
+          isWindows: IS_WINDOWS,
+          // PYTHON で明示的に上書きされているか。画面の注記を出し分けるために使う。
+          pythonFromEnv: process.env.PYTHON != null,
+        }));
+      });
+
       server.middlewares.use('/api/fetch-macro', (req, res) => {
         if (req.method !== 'POST' && req.method !== 'GET') {
           res.statusCode = 405;
@@ -301,10 +448,10 @@ export function macroPlugin(): Plugin {
         };
 
         send({ type: 'log', message: '=== マクロ分析開始 ===' });
-        send({ type: 'step', step: 1, message: '① 最新記事を取得中... (python scripts/fetch_macro.py)' });
+        send({ type: 'step', step: 1, message: `① 最新記事を取得中... (${PYTHON_BIN} scripts/fetch_macro.py)` });
 
         // ① Python スクリプトで記事取得
-        const py = spawn('python', ['scripts/fetch_macro.py'], {
+        const py = spawn(PYTHON_BIN, ['scripts/fetch_macro.py'], {
           cwd,
           shell: true,
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -323,27 +470,41 @@ export function macroPlugin(): Plugin {
           });
         });
         py.on('error', (err) => {
-          finish('error', `Python実行エラー: ${err.message}`);
+          finish('error', `Python実行エラー（${PYTHON_BIN}）: ${err.message}`
+            + ((err as NodeJS.ErrnoException).code === 'ENOENT' ? pythonNotFoundHint() : ''));
         });
 
         py.on('close', (code) => {
           if (code !== 0) {
-            finish('error', `fetch_macro.py が失敗 (exit=${code})`);
+            // Python のコマンド名が環境と合っていない場合の案内（終了コードは OS で違う）
+            const hint = pythonNotFoundSuffix(code);
+            finish('error', `fetch_macro.py が失敗 (exit=${code})${hint}`);
             return;
           }
           send({ type: 'log', message: '✓ macro_raw.txt を生成しました' });
           send({ type: 'step', step: 2, message: '② Claude Code で分析中... (claude -p → JSON)' });
 
           // ② claude -p で JSON を得る
+          // プロンプトは **argv ではなく stdin** で渡す。
+          // CLAUDE_PROMPT には改行・引用符・バッククォート（```json のコードフェンス）が
+          // 含まれるため、argv に載せると shell: true 実行時にシェルへ素通しされ、
+          // バッククォートがコマンド置換として解釈されてプロンプトが破壊される
+          // （macOS/Linux で発生。Windows の cmd.exe では顕在化しなかった）。
+          // stdin 経由なら shell を経由しないので、どの OS でも内容がそのまま届く。
           const claude = spawn(
             'claude',
-            ['-p', CLAUDE_PROMPT, '--permission-mode', 'acceptEdits'],
+            ['-p', '--permission-mode', 'acceptEdits'],
             {
               cwd,
               shell: true,
-              stdio: ['ignore', 'pipe', 'pipe'],
+              stdio: ['pipe', 'pipe', 'pipe'],
             }
           );
+
+          // プロンプトを stdin に流し込んで閉じる（EOF を送らないと claude が待ち続ける）
+          claude.stdin.on('error', () => { /* 相手が先に終了した場合は無視 */ });
+          claude.stdin.write(CLAUDE_PROMPT);
+          claude.stdin.end();
 
           let claudeStdout = '';
           claude.stdout.on('data', (chunk) => {
@@ -396,6 +557,288 @@ export function macroPlugin(): Plugin {
           }
         });
       });
+
+      // ── 株価だけを更新する（Claude を呼ばないので課金は発生しない） ──
+      server.middlewares.use('/api/refresh-prices', (req, res) => {
+        if (req.method !== 'POST' && req.method !== 'GET') {
+          res.statusCode = 405;
+          res.end('Method Not Allowed');
+          return;
+        }
+
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        });
+
+        const send = (data: Record<string, unknown>) => {
+          res.write(`data: ${JSON.stringify(data)}\n\n`);
+        };
+
+        let finished = false;
+        const finish = (type: 'done' | 'error', message?: string) => {
+          if (finished) return;
+          finished = true;
+          send({ type, message });
+          res.end();
+        };
+
+        send({ type: 'log', message: `株価を取得中... (${PYTHON_BIN} scripts/refresh_prices.py)` });
+
+        const py = spawn(PYTHON_BIN, ['scripts/refresh_prices.py'], {
+          cwd: process.cwd(),
+          shell: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        py.stdout.on('data', (chunk) => {
+          chunk.toString('utf8').split(/\r?\n/).forEach((line: string) => {
+            if (line.trim()) send({ type: 'log', message: line });
+          });
+        });
+        py.stderr.on('data', (chunk) => {
+          chunk.toString('utf8').split(/\r?\n/).forEach((line: string) => {
+            if (line.trim()) send({ type: 'log', message: `[py-err] ${line}` });
+          });
+        });
+        py.on('error', (err) => {
+          finish('error', `Python実行エラー（${PYTHON_BIN}）: ${err.message}`
+            + ((err as NodeJS.ErrnoException).code === 'ENOENT' ? pythonNotFoundHint() : ''));
+        });
+        py.on('close', (code) => {
+          if (code !== 0) {
+            const hint = pythonNotFoundSuffix(code);
+            finish('error', `refresh_prices.py が失敗 (exit=${code})${hint}`);
+            return;
+          }
+          finish('done', '株価を更新しました');
+        });
+
+        req.on('close', () => {
+          if (!finished) {
+            try { py.kill(); } catch {}
+          }
+        });
+      });
+
+      // ═══════════════════════════════════════════════════════════════
+      // BEGIN: フルスクリーニング実行エンドポイント
+      //
+      // 【削除方法】不要になったら次の3点を消すだけで元に戻る:
+      //   1. この BEGIN〜END ブロック
+      //   2. src/ScreeningRunButton.tsx（ファイルごと削除）
+      //   3. src/ScreeningView.tsx の import と <ScreeningRunButton /> の2行
+      // 【一時的に止める方法】.env.local に DISABLE_SCREENING_RUN=1 を書く
+      //   → ボタンが消え、エンドポイントも 403 を返す（コード変更・再起動不要）
+      //
+      // 株価更新（約12秒・API0回）と違い、この処理は約13分かかり
+      // EDINET DB を最大80回消費する（無料枠100回/日）。誤操作の代償が大きいため
+      // 次の多重防御を入れている:
+      //   ・二重起動の禁止（サーバ側で単一実行ロック）
+      //   ・同日2回目は force=1 が無いと拒否（API枠の保護）
+      //   ・実行前に data.ts / screening_result.json / screening_meta.json をバックアップ
+      //   ・業種コードは厳格に検証し、shell を経由せず spawn する（コマンド注入の防止）
+      // ═══════════════════════════════════════════════════════════════
+      // 状態問い合わせ（軽量・副作用なし）。
+      // 無効化フラグと前回実行日をクライアントに渡すためのもの。
+      // .env.local の1箇所で切れるよう、クライアント側に別のフラグは置かない。
+      server.middlewares.use('/api/screening-status', (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({
+          enabled: !isScreeningRunDisabled(),
+          lastRunDate: readLastScreeningDate(),
+          inFlight: screeningInFlight,
+          today: new Date().toLocaleDateString('sv-SE'),
+        }));
+      });
+
+      server.middlewares.use('/api/run-screening', (req, res) => {
+        // POST のみ。GET を許すと、ブラウザのプリフェッチやURL直打ちで
+        // 13分・EDINET80回の処理が走ってしまう。
+        if (req.method !== 'POST') {
+          res.statusCode = 405;
+          res.end('Method Not Allowed（POST のみ）');
+          return;
+        }
+
+        if (isScreeningRunDisabled()) {
+          res.statusCode = 403;
+          res.end('フルスクリーニングの実行は .env.local の DISABLE_SCREENING_RUN=1 で無効化されています');
+          return;
+        }
+
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        const rawIndustries = (url.searchParams.get('industries') ?? '').trim();
+        const preset = (url.searchParams.get('preset') ?? '').trim();
+        const top = (url.searchParams.get('top') ?? '15').trim();
+        const force = url.searchParams.get('force') === '1';
+
+        // ── 入力検証 ──
+        // shell を使わない spawn でも、想定外の値でスクリプトを走らせない。
+        if (!/^\d{4}(,\d{4})*$/.test(rawIndustries)) {
+          res.statusCode = 400;
+          res.end('industries は4桁の業種コードをカンマ区切りで指定してください');
+          return;
+        }
+        if (!/^[a-z_]{1,32}$/.test(preset)) {
+          res.statusCode = 400;
+          res.end('preset の形式が不正です');
+          return;
+        }
+        if (!/^\d{1,2}$/.test(top) || Number(top) < 1 || Number(top) > 50) {
+          res.statusCode = 400;
+          res.end('top は1〜50で指定してください');
+          return;
+        }
+
+        if (screeningInFlight) {
+          res.statusCode = 409;
+          res.end('すでにスクリーニングが実行中です');
+          return;
+        }
+
+        // ── 同日2回目の拒否（EDINET無料枠の保護）──
+        const lastRunDate = readLastScreeningDate();
+        const today = new Date().toLocaleDateString('sv-SE');
+        if (!force && lastRunDate === today) {
+          res.statusCode = 429;
+          res.end(`本日（${today}）はすでにスクリーニングを実行済みです。EDINETの無料枠は100回/日で、`
+            + '1回の実行で最大80回消費します。それでも実行する場合は force=1 を指定してください');
+          return;
+        }
+
+        screeningInFlight = true;
+
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        });
+
+        const send = (data: Record<string, unknown>) => {
+          res.write(`data: ${JSON.stringify(data)}\n\n`);
+        };
+
+        let finished = false;
+        let aborted = false;
+        const finish = (type: 'done' | 'error', message?: string) => {
+          if (finished) return;
+          finished = true;
+          screeningInFlight = false;
+          send({ type, message });
+          res.end();
+        };
+
+        // ── 実行前バックアップ ──
+        // 既存の15社を上書きするため、戻せる状態を作ってから走らせる。
+        let backupDir: string | null = null;
+        try {
+          backupDir = backupBeforeScreening();
+          send({ type: 'log', message: `バックアップ: ${backupDir}` });
+        } catch (e) {
+          finish('error', `バックアップに失敗したため中止しました: ${(e as Error).message}`);
+          return;
+        }
+
+        const args = [
+          'scripts/fetch_stocks.py',
+          '--industries', rawIndustries,
+          '--preset', preset,
+          '--top', top,
+        ];
+        send({ type: 'log', message: `実行: ${PYTHON_BIN} ${args.join(' ')}` });
+        send({ type: 'log', message: '所要 約10〜13分。この画面を閉じても実行は続きます。' });
+
+        // 業種コードを外部から受け取るため、原則シェルを経由しない（コマンド注入の防止）。
+        // ただし Windows では Node 18.20.2 以降のセキュリティ強化により
+        // shell: false で .bat / .cmd を起動できず、conda や一部の venv ラッパーが動かない。
+        // 引数は上で厳格に検証済み（数字・カンマ・小文字英字のみ）なので、
+        // Windows に限り shell: true を許す。
+        const py = spawn(PYTHON_BIN, args, {
+          cwd: process.cwd(),
+          shell: IS_WINDOWS,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        py.stdout.on('data', (chunk) => {
+          chunk.toString('utf8').split(/\r?\n/).forEach((line: string) => {
+            if (line.trim()) send({ type: 'log', message: line });
+          });
+        });
+        py.stderr.on('data', (chunk) => {
+          chunk.toString('utf8').split(/\r?\n/).forEach((line: string) => {
+            if (line.trim()) send({ type: 'log', message: `[py-err] ${line}` });
+          });
+        });
+        py.on('error', (err) => {
+          finish('error', `Python実行エラー（${PYTHON_BIN}）: ${err.message}`
+            + ((err as NodeJS.ErrnoException).code === 'ENOENT' ? pythonNotFoundHint() : ''));
+        });
+
+        py.on('close', (code) => {
+          if (aborted) {
+            finish('error', `中止しました。data.ts は変更されていません（バックアップ: ${backupDir}）`);
+            return;
+          }
+          if (code !== 0) {
+            const hint = pythonNotFoundSuffix(code);
+            finish('error', `fetch_stocks.py が失敗 (exit=${code})${hint}。`
+              + `data.ts は変更されていません（バックアップ: ${backupDir}）`);
+            return;
+          }
+
+          // スクリーニング成功後に data.ts へ反映する。
+          // fetch_stocks.py は JSON を書くだけなので、ここを通らないと画面は変わらない。
+          send({ type: 'log', message: '--- ダッシュボードへ反映 ---' });
+          const up = spawn(PYTHON_BIN, ['scripts/update_data.py'], {
+            cwd: process.cwd(),
+            shell: IS_WINDOWS,   // 上と同じ理由（Windows の .bat ラッパー対応）
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          up.stdout.on('data', (chunk) => {
+            chunk.toString('utf8').split(/\r?\n/).forEach((line: string) => {
+              if (line.trim()) send({ type: 'log', message: line });
+            });
+          });
+          up.stderr.on('data', (chunk) => {
+            chunk.toString('utf8').split(/\r?\n/).forEach((line: string) => {
+              if (line.trim()) send({ type: 'log', message: `[py-err] ${line}` });
+            });
+          });
+          up.on('error', (err) => finish('error', `update_data.py の起動に失敗: ${err.message}`));
+          up.on('close', (c2) => {
+            if (c2 !== 0) {
+              finish('error', `update_data.py が失敗 (exit=${c2})。`
+                + `screening_result.json は更新済みなので ${PYTHON_BIN} scripts/update_data.py を手で実行してください`);
+              return;
+            }
+            finish('done', 'スクリーニングを完了し、ダッシュボードに反映しました');
+          });
+        });
+
+        // 中止ボタン（クライアント切断）で Python を止める。
+        // fetch_stocks.py は最後にまとめて書き出すため、途中で止めても
+        // data.ts / screening_result.json は壊れない。
+        req.on('close', () => {
+          if (!finished) {
+            aborted = true;
+            // Windows で shell: true のときは cmd.exe が親になるため、
+            // SIGTERM だけだと子の python が残る。taskkill でプロセスツリーごと止める。
+            try {
+              if (IS_WINDOWS && py.pid) {
+                spawn('taskkill', ['/pid', String(py.pid), '/T', '/F'], { shell: false });
+              } else {
+                py.kill('SIGTERM');
+              }
+            } catch {}
+            screeningInFlight = false;
+          }
+        });
+      });
+      // ═══════════════════════════════════════════════════════════════
+      // END: フルスクリーニング実行エンドポイント
+      // ═══════════════════════════════════════════════════════════════
     },
   };
 }

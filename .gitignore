@@ -4,3 +4,18 @@ dist/
 .env
 .env.local
 *.log
+
+# Python
+__pycache__/
+*.pyc
+
+# EDINET DB の取得キャッシュ（再取得可能・実行のたびに増える）
+scripts/cache/
+
+# パイプラインの中間生成物
+scripts/screening_result.json
+scripts/screening_meta.json
+scripts/macro_raw.txt
+
+# フルスクリーニング実行前の自動バックアップ（ローカル専用）
+scripts/backup/

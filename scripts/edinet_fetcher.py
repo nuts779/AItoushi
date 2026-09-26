@@ -5,11 +5,15 @@ EDINET DB APIクライアント
 - 罠検出・スコア計算用メトリクス抽出
 使い方: python scripts/edinet_fetcher.py --test 3635,3626,6036
 """
-import sys, io, json, requests, argparse
+import sys, io, re, json, requests, argparse
 from pathlib import Path
 from datetime import datetime, timedelta, date
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# 出力を UTF-8 にする。新しい TextIOWrapper を被せると、
+# 別スクリプトから import されたとき前のラッパーが破棄されて
+# 元の buffer ごと閉じられてしまうため、reconfigure で既存の stdout を設定し直す。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 BASE_URL = "https://edinetdb.jp/v1"
 CACHE_DIR = Path("scripts/cache/edinet")
@@ -167,7 +171,28 @@ def extract_metrics(company: dict) -> dict:
     oi_5y  = [float(f.get("ordinary_income") or 0) for f in recent_5y]
     ni_5y  = [float(f.get("net_income")      or 0) for f in recent_5y]
     eps_5y = [float(f.get("eps")             or 0) for f in recent_5y]
+    rev_5y = [float(f.get("revenue")         or 0) for f in recent_5y]
     eq_ratio = to_pct(latest.get("equity_ratio_official"))
+
+    def num(v):
+        """欠損を 0 に丸めずに None のまま返す。
+        0 に丸めると「その年は0円だった」と「タグ付けされていない」が
+        区別できなくなり、罠検出が誤判定する。"""
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def series(key):
+        return [num(f.get(key)) for f in recent_5y]
+
+    # 罠検出v2の追加ルール用。いずれも全15社で取得できることを実測済み。
+    cf_5y   = series("cf_operating")
+    recv_5y = series("trade_receivables")
+    inv_5y  = series("inventories")
+    rev_raw_5y = series("revenue")
 
     # TDNet開示日：earnings にあればそちらを使用、なければ決算期末から推定
     disclosure_date = None
@@ -182,6 +207,7 @@ def extract_metrics(company: dict) -> dict:
         "oi_5y":               oi_5y,
         "ni_5y":               ni_5y,
         "eps_5y":              eps_5y,
+        "rev_5y":              rev_5y,
         "equity_ratio":        eq_ratio,
         "disclosure_date":     disclosure_date,
         "accounting_standard": acct_std,
@@ -189,22 +215,152 @@ def extract_metrics(company: dict) -> dict:
         "latest_ni":           ni_5y[-1]  if ni_5y  else 0,
         "latest_roe":          roe_5y[-1] if roe_5y else 0,
         "fiscal_year":         latest.get("fiscal_year"),
+        # 追加ルール用（欠損は None のまま。判定不能の判別に使う）
+        "cf_5y":               cf_5y,
+        "recv_5y":             recv_5y,
+        "inv_5y":              inv_5y,
+        "rev_raw_5y":          rev_raw_5y,
+        "net_assets":          num(latest.get("net_assets")),
+        "goodwill":            num(latest.get("goodwill")),
+        "loans": {
+            "short_term_loans":         num(latest.get("short_term_loans")),
+            "long_term_loans":          num(latest.get("long_term_loans")),
+            "current_portion_lt_loans": num(latest.get("current_portion_lt_loans")),
+        },
     }
 
 
 # ──────────────────────────────────────────
-# 罠検出 v2（EDINET DB 強化版・5ルール）
+# 財務詳細の抽出（ダッシュボードの edinetDetails 用）
 # ──────────────────────────────────────────
-def detect_trap_v2(metrics: dict) -> tuple[str, list[str], int]:
+def clean_title(raw) -> str | None:
+    """決算短信タイトルを表示用に整える。
+
+    EDINET DB のタイトルにはスクレイプ元のHTML由来の文字列が残っていることがある。
+      例) "keyboard_arrow_right 2027年３月期 第１四半期決算短信〔ＩＦＲＳ〕（連結）"
+          "2026年12月期　第2四半期決算短信【PDF：260 KB】"
+    そのまま画面に出すと出所の信頼性を損なうため、ここで落とす。
     """
-    Returns: (flag, reasons, score_delta)
+    if not raw:
+        return None
+    t = str(raw)
+    t = re.sub(r'^\s*(keyboard_arrow_right|arrow_forward|picture_as_pdf)\s*', '', t)
+    t = re.sub(r'^\s*\d{4}[./-]\d{1,2}[./-]\d{1,2}\s+', '', t)   # 先頭の開示日
+    t = re.sub(r'【PDF[^】]*】', '', t)                              # 【PDF：260 KB】
+    t = re.sub(r'[（(]?\s*[\d,.]+\s*[KMGkmg]?B\s*[)）]?\s*$', '', t)  # 末尾のファイルサイズ
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t or None
+
+
+def extract_detail(company: dict) -> dict:
+    """
+    EDINETデータから src/types.ts の EdinetDetail 相当の値を抽出する。
+
+    単位の扱い（実データで検証済み）:
+      - financials（有報）の revenue / net_income 等は「円」→ 1e8 で割って億円にする
+      - financials の equity_ratio_official / roe_official は 0〜1 の小数 → ×100 で %
+      - earnings（決算短信）の金額は「百万円」（eps×株数と一致することを確認）
+      - earnings の equity_ratio は既に % 表記
+    """
+    financials = company.get("financials", [])
+    earnings = company.get("earnings", [])
+    if not financials:
+        return {}
+
+    latest = financials[-1]
+
+    def oku(v):
+        """円 → 億円（小数1桁）"""
+        if v is None:
+            return None
+        return round(float(v) / 1e8, 1)
+
+    def pct(v):
+        """0〜1の小数なら % に変換"""
+        if v is None:
+            return None
+        fv = float(v)
+        return round(fv * 100 if abs(fv) <= 1.0 else fv, 1)
+
+    detail = {
+        "fiscalYear": latest.get("fiscal_year"),
+        "annualEquityRatio": pct(latest.get("equity_ratio_official")),
+        "annualROE": pct(latest.get("roe_official")),
+        "annualNetIncome": oku(latest.get("net_income")),
+        "annualOrdinaryIncome": oku(latest.get("ordinary_income")),
+        "annualRevenue": oku(latest.get("revenue")),
+        # 一次資料へのリンク。数値だけを見せて出所に飛べない状態を作らないため、
+        # 有報（EDINET提出書類）と決算短信PDFのURLをそのまま持ち回る。
+        "edinetUrl": latest.get("edinet_view_url") or latest.get("edinet_filing_url"),
+        "earningsPdfUrl": None,
+        "earningsTitle": None,
+        # 直近決算短信。EDINET DB は直近30日ウィンドウのため取れないことがある。
+        # その場合は黙って埋めず null のままにする（鮮度保証の方針）。
+        "latestQuarter": None,
+        "latestDisclosureDate": None,
+        "latestEquityRatio": None,
+        "latestNetIncome": None,
+        "latestNetIncomeChange": None,
+        "forecastNetIncome": None,
+        "forecastNetIncomeChange": None,
+    }
+
+    if earnings:
+        e = earnings[0]
+        d = parse_date(e.get("disclosure_date"))
+        detail.update({
+            "latestQuarter": e.get("quarter"),
+            "latestDisclosureDate": d.isoformat() if d else None,
+            "latestEquityRatio": e.get("equity_ratio"),
+            "latestNetIncome": e.get("net_income"),
+            "latestNetIncomeChange": e.get("net_income_change"),
+            "forecastNetIncome": e.get("forecast_net_income"),
+            "forecastNetIncomeChange": e.get("forecast_net_income_change"),
+            "earningsPdfUrl": e.get("pdf_url"),
+            "earningsTitle": clean_title(e.get("title")),
+        })
+
+    return detail
+
+
+# ──────────────────────────────────────────
+# 罠検出 v2（EDINET DB 強化版・10ルール）
+# ──────────────────────────────────────────
+# 各ルールは3つの結果を持つ:
+#   ・該当   → reasons に理由を積む（減点対象）
+#   ・非該当 → 何もしない（＝健全）
+#   ・判定不能 → undetermined に「ルール名: なぜ測れないか」を積む
+#
+# 「判定不能」を非該当と同じ扱いにすると、測っていないだけの項目が
+# 「問題なし」として表示される。これは本プロジェクトの原則③
+# （測っていないものを良し悪しで語らない）に反するため必ず分けて返す。
+RULE_LABELS = [
+    "ROE急騰", "EPS急騰", "特別利益の上乗せ", "赤字急回復", "自己資本比率",
+    "営業CFと純利益の乖離", "売上債権の急増", "在庫の急増",
+    "有利子負債の水準", "のれんの規模",
+]
+
+
+def _oku(v) -> float:
+    """円 → 億円"""
+    return (v or 0) / 1e8
+
+
+def detect_trap_v2(metrics: dict) -> tuple[str, list[str], list[str], int]:
+    """
+    Returns: (flag, reasons, undetermined, score_delta)
       flag: 'normal' / 'suspicious' / 'dangerous'
+      reasons: 該当した罠の説明
+      undetermined: 「ルール名: 測れない理由」のリスト
       score_delta: +3（健全）/ -15（suspicious）/ -30（dangerous）
     """
     if not metrics:
-        return "normal", [], 0
+        # 財務そのものが無い＝全ルール判定不能
+        return "normal", [], [f"{lbl}: 財務データを取得できていない" for lbl in RULE_LABELS], 0
 
-    reasons = []
+    reasons: list[str] = []
+    undet: list[str] = []
+
     roe_5y = metrics.get("roe_5y", [])
     eps_5y = metrics.get("eps_5y", [])
     oi_5y  = metrics.get("oi_5y",  [])
@@ -215,45 +371,224 @@ def detect_trap_v2(metrics: dict) -> tuple[str, list[str], int]:
     ni     = metrics.get("latest_ni", 0)
 
     # ルール1: ROE急騰（直近 > 過去平均 × 2.0）
-    if len(roe_5y) >= 4:
-        past = [v for v in roe_5y[:-1] if v > 0]
-        if past:
-            avg = sum(past) / len(past)
-            if roe_5y[-1] > avg * 2.0:
-                reasons.append(f"ROE急騰({avg:.1f}%→{roe_5y[-1]:.1f}%)")
+    past = [v for v in roe_5y[:-1] if v > 0] if len(roe_5y) >= 4 else []
+    if not past:
+        undet.append("ROE急騰: 比較できる過去4期ぶんのROEが無い")
+    else:
+        avg = sum(past) / len(past)
+        if roe_5y[-1] > avg * 2.0:
+            reasons.append(f"ROE急騰({avg:.1f}%→{roe_5y[-1]:.1f}%)")
 
     # ルール2: EPS急騰（直近 > 過去平均 × 2.5）
-    if len(eps_5y) >= 4:
-        past = [v for v in eps_5y[:-1] if v > 0]
-        if past:
-            avg = sum(past) / len(past)
-            if eps_5y[-1] > avg * 2.5:
-                reasons.append(f"EPS急騰({avg:.1f}→{eps_5y[-1]:.1f})")
+    past = [v for v in eps_5y[:-1] if v > 0] if len(eps_5y) >= 4 else []
+    if not past:
+        undet.append("EPS急騰: 比較できる過去4期ぶんのEPSが無い")
+    else:
+        avg = sum(past) / len(past)
+        if eps_5y[-1] > avg * 2.5:
+            reasons.append(f"EPS急騰({avg:.1f}→{eps_5y[-1]:.1f})")
 
     # ルール3: 純利益 >> 経常利益（JP GAAP のみ・特別利益疑い）
     # JP GAAP の正常値: 純利益 ≈ 経常利益 × 0.65〜0.75（実効税率30%）
-    # 純利益 > 経常利益 × 0.9 なら特別利益が上乗せされている可能性
-    if acct == "JP" and oi and oi > 0 and ni > oi * 0.9:
-        reasons.append(
-            f"純利益({ni/1e8:.1f}億)>経常利益×0.9（特益疑い）"
-        )
+    # IFRS/US GAAP には経常利益が無いため、この比較自体が成立しない。
+    if acct != "JP":
+        undet.append(f"特別利益の上乗せ: 会計基準が{acct}で経常利益の概念が無い")
+    elif not oi or oi <= 0:
+        undet.append("特別利益の上乗せ: 経常利益が取得できていない（または赤字）")
+    elif ni > oi * 0.9:
+        reasons.append(f"純利益({_oku(ni):.1f}億)>経常利益×0.9（特益疑い）")
 
     # ルール4: 赤字急回復（過去3年に赤字期あり & 直近黒字）
-    if len(oi_5y) >= 3 and oi_5y[-1] > 0:
-        if any(v < 0 for v in oi_5y[:-1]):
-            reasons.append("赤字急回復")
+    if len(oi_5y) < 3:
+        undet.append("赤字急回復: 過去3期ぶんの経常利益が無い")
+    elif oi_5y[-1] > 0 and any(v < 0 for v in oi_5y[:-1]):
+        reasons.append("赤字急回復")
 
     # ルール5: 自己資本比率低水準
-    if 0 < eq < 40:
+    if not eq or eq <= 0:
+        undet.append("自己資本比率: 取得できていない")
+    elif eq < 40:
         reasons.append(f"自己資本比率{eq:.1f}%（低水準）")
 
-    if len(reasons) >= 2:
-        return "dangerous", reasons, -30
-    elif len(reasons) == 1:
-        return "suspicious", reasons, -15
+    # ルール6: 営業CFと純利益の乖離
+    # 会計上の利益は出ているのに現金が入ってきていない状態。
+    # 売上の前倒し計上・回収不能債権の温存を早期に検知する古典的な指標。
+    cf_5y = metrics.get("cf_5y", []) or []
+    cf = cf_5y[-1] if cf_5y else None
+    if cf is None:
+        undet.append("営業CFと純利益の乖離: 営業キャッシュフローが取得できていない")
+    elif ni is None or ni <= 0:
+        undet.append("営業CFと純利益の乖離: 純利益が黒字でないため比較対象にならない")
+    elif cf < ni * 0.5:
+        reasons.append(
+            f"営業CF({_oku(cf):.1f}億)が純利益({_oku(ni):.1f}億)の半分未満（利益の裏づけが薄い）"
+        )
+
+    # ルール7/8: 運転資本の急増（売上の伸びを大きく上回る増加）
+    rev_raw = metrics.get("rev_raw_5y", []) or []
+
+    def _growth(series: list) -> float | None:
+        if len(series) < 2:
+            return None
+        prev, latest = series[-2], series[-1]
+        if prev is None or latest is None or prev <= 0:
+            return None
+        return (latest - prev) / prev * 100
+
+    rev_g = _growth(rev_raw)
+
+    def _working_capital_rule(key: str, label: str, jp: str) -> None:
+        series = metrics.get(key, []) or []
+        g = _growth(series)
+        if g is None:
+            undet.append(f"{label}: 前期比を出せる2期ぶんの{jp}が無い")
+        elif rev_g is None:
+            undet.append(f"{label}: 比較対象になる売上高の前期比を出せない")
+        elif g - rev_g > 20:
+            reasons.append(f"{jp}+{g:.0f}% > 売上+{rev_g:.0f}%（{label}）")
+
+    _working_capital_rule("recv_5y", "売上債権の急増", "売上債権")
+    _working_capital_rule("inv_5y",  "在庫の急増",     "在庫")
+
+    # ルール9: 有利子負債の水準
+    # 3項目のうち一部しか取れないことがある。取れたぶんだけの合計は
+    # 実際の有利子負債の「下限」なので、下限が閾値を超えたときだけ断定する。
+    # 下限が閾値以下でも、欠けている項目があるなら「問題なし」とは言えない＝判定不能。
+    loans = metrics.get("loans", {}) or {}
+    present = {k: v for k, v in loans.items() if v is not None}
+    net_assets = metrics.get("net_assets")
+    if not net_assets or net_assets <= 0:
+        undet.append("有利子負債の水準: 純資産が取得できていない")
+    elif not present:
+        undet.append("有利子負債の水準: 借入金がXBRLにタグ付けされていない")
     else:
+        ibd = sum(present.values())
+        ratio = ibd / net_assets
+        missing = len(loans) - len(present)
+        if ratio > 1.0:
+            reasons.append(
+                f"有利子負債({_oku(ibd):.0f}億)が純資産の{ratio * 100:.0f}%（D/E {ratio:.1f}倍）"
+            )
+        elif missing:
+            undet.append(
+                f"有利子負債の水準: {missing}項目が未タグ付けで合計を確定できない"
+                f"（取得できたぶんではD/E {ratio:.2f}倍）"
+            )
+
+    # ルール10: のれんの規模
+    # のれんが null のとき「M&Aしていない」のか「タグ付けされていない」のかを
+    # EDINETのデータからは区別できない。0億円と決めつけず判定不能にする。
+    goodwill = metrics.get("goodwill")
+    if not net_assets or net_assets <= 0:
+        pass  # 純資産の判定不能はルール9で既に記録済み
+    elif goodwill is None:
+        undet.append("のれんの規模: のれんがXBRLにタグ付けされていない（M&Aの有無を判定できない）")
+    elif goodwill / net_assets > 0.3:
+        reasons.append(
+            f"のれん({_oku(goodwill):.0f}億)が純資産の{goodwill / net_assets * 100:.0f}%（減損リスク）"
+        )
+
+    if len(reasons) >= 2:
+        return "dangerous", reasons, undet, -30
+    elif len(reasons) == 1:
+        return "suspicious", reasons, undet, -15
+    else:
+        # ボーナスは「自己資本比率が高い」ことに対する加点であり、
+        # 「罠が無いことを確認できた」という意味ではない。判定不能の有無とは独立に扱う。
         bonus = 3 if eq >= 60 else 0
-        return "normal", [], bonus
+        return "normal", [], undet, bonus
+
+# ──────────────────────────────────────────
+# 6項目評価（100点満点）
+# ──────────────────────────────────────────
+# 現在データを取得できているのは4項目・65点ぶん。
+# 残る2項目は算出根拠が無いため None を返し、画面に「未算出」と表示させる。
+# 取得できていないものを中立値などで埋めると、評価が成立していないことが見えなくなる。
+#
+#   ① カタリスト   /20 … 決算発表予定日の取得手段が無いため未算出
+#   ② モメンタム   /20 … EDINET の年次推移から算出
+#   ③ 需給・テクニカル /15 … 信用倍率・出来高を取得していないため未算出
+#   ④ バリュエーション /15 … PER・PBR から算出
+#   ⑤ 下値リスク   /15 … 自己資本比率から算出
+#   ⑥ 配当         /15 … 配当利回りから算出（連続増配ぶん3点は未取得のため最大12）
+
+SCORE_MAX = {
+    "catalyst": 20, "momentum": 20, "supply": 15,
+    "valuation": 15, "downside": 15, "dividend": 15,
+}
+
+
+def _yoy(series: list[float]) -> float | None:
+    """直近と前期の変化率(%)。前期が0以下なら比較不能として None を返す。"""
+    if len(series) < 2:
+        return None
+    prev, latest = series[-2], series[-1]
+    if prev <= 0:
+        return None
+    return (latest - prev) / prev * 100
+
+
+def _band(value, table, default=0):
+    """(閾値, 点数) のリストを上から評価して点数を返す。"""
+    if value is None:
+        return default
+    for threshold, points in table:
+        if value >= threshold:
+            return points
+    return default
+
+
+def calc_score_breakdown(metrics: dict, yf_data: dict) -> dict:
+    """6項目評価を算出する。算出できない項目は None。"""
+    # ② モメンタム /20 … 純利益10 + 経常利益6 + 売上4
+    ni_yoy = _yoy(metrics.get("ni_5y", []))
+    oi_yoy = _yoy(metrics.get("oi_5y", []))
+    rev_yoy = _yoy(metrics.get("rev_5y", []))
+    if ni_yoy is None and oi_yoy is None and rev_yoy is None:
+        momentum = None
+    else:
+        momentum = (
+            _band(ni_yoy,  [(30, 10), (15, 8), (5, 6), (0.01, 3)])
+            + _band(oi_yoy, [(30, 6), (15, 5), (5, 3), (0.01, 2)])
+            + _band(rev_yoy, [(10, 4), (5, 3), (0.01, 2)])
+        )
+
+    # ④ バリュエーション /15 … PER8 + PBR7
+    # PER が取れない銘柄は「割安と判断できない」ため加点しない（0点）
+    per = yf_data.get("per")
+    pbr = yf_data.get("pbr") or 0
+    per_pts = 0
+    if per is not None:
+        if 8 <= per <= 15:   per_pts = 8
+        elif per < 8:        per_pts = 6
+        elif per <= 20:      per_pts = 6
+        elif per <= 25:      per_pts = 4
+        else:                per_pts = 2
+    if pbr <= 0:      pbr_pts = 0
+    elif pbr < 1.0:   pbr_pts = 7
+    elif pbr < 1.5:   pbr_pts = 6
+    elif pbr < 2.0:   pbr_pts = 5
+    elif pbr < 3.0:   pbr_pts = 3
+    else:             pbr_pts = 1
+    valuation = per_pts + pbr_pts
+
+    # ⑤ 下値リスク /15 … 自己資本比率
+    eq = metrics.get("equity_ratio")
+    downside = _band(eq, [(70, 15), (60, 13), (50, 11), (40, 8), (30, 5)], default=2) \
+        if eq else None
+
+    # ⑥ 配当 /15 … 利回りのみ（連続増配年数は未取得のため最大12点）
+    div = yf_data.get("dividend")
+    dividend = _band(div, [(5, 12), (4, 11), (3, 9), (2, 6), (1, 3)]) if div is not None else None
+
+    return {
+        "catalyst":  None,       # 決算発表予定日を取得していない
+        "momentum":  momentum,
+        "supply":    None,       # 信用倍率・出来高を取得していない
+        "valuation": valuation,
+        "downside":  downside,
+        "dividend":  dividend,
+    }
 
 
 # ──────────────────────────────────────────
@@ -312,7 +647,7 @@ if __name__ == "__main__":
             continue
 
         metrics                    = extract_metrics(company)
-        trap_flag, reasons, delta  = detect_trap_v2(metrics)
+        trap_flag, reasons, undet, delta = detect_trap_v2(metrics)
         freshness                  = calc_freshness_edinet(metrics.get("disclosure_date"))
         status                     = "⚠" if trap_flag != "normal" else "✓"
         name                       = (entry or {}).get("name_ja", "")[:14]
@@ -325,5 +660,7 @@ if __name__ == "__main__":
         )
         for r in reasons:
             print(f"      └ {r}")
+        for u in undet:
+            print(f"      ? {u}")
 
     print(f"\nリクエスト消費: {client.request_count}回（キャッシュ済みは0カウント）")
