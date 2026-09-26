@@ -1,7 +1,7 @@
 import { pipelineMeta, screeningStocks, macroMeta } from './data';
 import { isUnavailable } from './dataSource';
 import {
-  businessDaysSince, calendarDaysSince, freshnessCounts,
+  businessDaysSince, calendarDaysSince, freshnessCounts, priceFreshnessLabel,
   PRICE_BIZ_DAYS, MACRO_DAYS,
 } from './freshness';
 
@@ -57,8 +57,9 @@ export default function FreshnessBanner() {
     priceBizDays <= PRICE_BIZ_DAYS.fresh ? 'fresh'
     : priceBizDays <= PRICE_BIZ_DAYS.warn ? 'warn'
     : 'alert';
-  const priceHeadline =
-    priceBizDays <= 0 ? '本日' : `${priceBizDays}営業日前`;
+  // 「0営業日 = 本日」ではない。週末は金曜終値のまま0営業日になるため、
+  // 文言の組み立ては freshness.ts に任せる（BUG-022）。
+  const priceHeadline = priceFreshnessLabel(priceDate);
   const priceFailed = pipelineMeta.priceFailedCount ?? 0;
 
   // ── 財務：カレンダー日数で判定する（決算サイクルに合わせる） ──
@@ -101,7 +102,9 @@ export default function FreshnessBanner() {
             ? `${priceDate}・取得失敗${priceFailed}件`
             : priceDate
         }
-        title={`株価取得日: ${priceDate}（${priceBizDays}営業日前） / ${pipelineMeta.priceSource}\n目標は2営業日以内`}
+        title={`株価取得日: ${priceDate}（${priceHeadline}） / ${pipelineMeta.priceSource}\n`
+          + `経過営業日数: ${priceBizDays}（目標は${PRICE_BIZ_DAYS.fresh}営業日以内）\n`
+          + '土日は前営業日の終値のままになる。これ以上新しい株価は存在しない'}
       />
       <Pill
         label="財務"

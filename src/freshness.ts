@@ -59,6 +59,29 @@ export function businessDaysSince(isoDate?: string | null): number | null {
 }
 
 /**
+ * 株価の基準日を人が読む文言にする。
+ *
+ * 営業日数 0 は「今日」を意味しない。土曜・日曜に金曜の終値を見ると
+ * 経過営業日数は 0 だが、日付は前営業日のものである。
+ * ここを `0 → '本日'` と書いていたため、週末は必ず
+ * 「本日」の横に前日の日付が並ぶという嘘が出ていた（BUG-022）。
+ *
+ * 鮮度の判定（緑/黄/赤）は営業日数のままで正しい。
+ * 土曜時点の金曜終値はこれ以上新しくならないため、最新として扱ってよい。
+ * 直すのは**文言だけ**である。
+ */
+export function priceFreshnessLabel(isoDate?: string | null): string {
+  const cal = calendarDaysSince(isoDate);
+  const biz = businessDaysSince(isoDate);
+  if (cal === null || biz === null) return '取得日不明';
+  // 未来の日付は「本日」と言わない。data.ts の生成ミスを隠さないため。
+  if (cal < 0) return '基準日が未来（要確認）';
+  if (cal === 0) return '本日';
+  if (biz === 0) return '前営業日';
+  return `${biz}営業日前`;
+}
+
+/**
  * 決算開示日から財務データの鮮度タグを求める。
  * 基準日が無い銘柄は鮮度を保証できないため critical とする（安全側）。
  */
